@@ -6,6 +6,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"gomodel/internal/core"
 )
@@ -18,7 +19,9 @@ type Server struct {
 
 // Config holds server configuration options
 type Config struct {
-	MasterKey string // Optional: Master key for authentication
+	MasterKey       string // Optional: Master key for authentication
+	MetricsEnabled  bool   // Whether to expose Prometheus metrics endpoint
+	MetricsEndpoint string // HTTP path for metrics endpoint (default: /metrics)
 }
 
 // New creates a new HTTP server
@@ -39,6 +42,16 @@ func New(provider core.RoutableProvider, cfg *Config) *Server {
 
 	// Routes
 	e.GET("/health", handler.Health)
+
+	// Conditionally register metrics endpoint
+	if cfg != nil && cfg.MetricsEnabled {
+		metricsPath := cfg.MetricsEndpoint
+		if metricsPath == "" {
+			metricsPath = "/metrics"
+		}
+		e.GET(metricsPath, echo.WrapHandler(promhttp.Handler()))
+	}
+
 	e.GET("/v1/models", handler.ListModels)
 	e.POST("/v1/chat/completions", handler.ChatCompletion)
 	e.POST("/v1/responses", handler.Responses)
