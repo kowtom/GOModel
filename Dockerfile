@@ -24,9 +24,6 @@ COPY --from=builder /app/config/*.yaml /app/config
 
 WORKDIR /app
 
-# Run as non-root user
-USER 1000
-
 EXPOSE 8080
 
 ENTRYPOINT ["/gomodel"]
