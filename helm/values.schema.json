@@ -2,6 +2,32 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "title": "GOModel Helm Chart Values",
   "type": "object",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "gateway": {
+            "properties": { "enabled": { "const": true } }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "gateway": {
+            "properties": {
+              "parentRef": {
+                "properties": {
+                  "name": { "minLength": 1 }
+                },
+                "required": ["name"]
+              }
+            },
+            "required": ["parentRef"]
+          }
+        }
+      }
+    }
+  ],
   "anyOf": [
     {
       "properties": {
