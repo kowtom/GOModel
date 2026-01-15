@@ -72,6 +72,33 @@
                 "enabled": { "const": true }
               }
             }
+          },
+          "if": {
+            "properties": {
+              "openai": {
+                "properties": { "enabled": { "const": true } }
+              }
+            }
+          },
+          "then": {
+            "anyOf": [
+              {
+                "properties": {
+                  "existingSecret": { "minLength": 1 }
+                },
+                "required": ["existingSecret"]
+              },
+              {
+                "properties": {
+                  "openai": {
+                    "properties": {
+                      "apiKey": { "minLength": 1 }
+                    },
+                    "required": ["apiKey"]
+                  }
+                }
+              }
+            ]
           }
         }
       }
@@ -85,6 +112,33 @@
                 "enabled": { "const": true }
               }
             }
+          },
+          "if": {
+            "properties": {
+              "anthropic": {
+                "properties": { "enabled": { "const": true } }
+              }
+            }
+          },
+          "then": {
+            "anyOf": [
+              {
+                "properties": {
+                  "existingSecret": { "minLength": 1 }
+                },
+                "required": ["existingSecret"]
+              },
+              {
+                "properties": {
+                  "anthropic": {
+                    "properties": {
+                      "apiKey": { "minLength": 1 }
+                    },
+                    "required": ["apiKey"]
+                  }
+                }
+              }
+            ]
           }
         }
       }
@@ -98,6 +152,33 @@
                 "enabled": { "const": true }
               }
             }
+          },
+          "if": {
+            "properties": {
+              "gemini": {
+                "properties": { "enabled": { "const": true } }
+              }
+            }
+          },
+          "then": {
+            "anyOf": [
+              {
+                "properties": {
+                  "existingSecret": { "minLength": 1 }
+                },
+                "required": ["existingSecret"]
+              },
+              {
+                "properties": {
+                  "gemini": {
+                    "properties": {
+                      "apiKey": { "minLength": 1 }
+                    },
+                    "required": ["apiKey"]
+                  }
+                }
+              }
+            ]
           }
         }
       }
@@ -111,6 +192,33 @@
                 "enabled": { "const": true }
               }
             }
+          },
+          "if": {
+            "properties": {
+              "groq": {
+                "properties": { "enabled": { "const": true } }
+              }
+            }
+          },
+          "then": {
+            "anyOf": [
+              {
+                "properties": {
+                  "existingSecret": { "minLength": 1 }
+                },
+                "required": ["existingSecret"]
+              },
+              {
+                "properties": {
+                  "groq": {
+                    "properties": {
+                      "apiKey": { "minLength": 1 }
+                    },
+                    "required": ["apiKey"]
+                  }
+                }
+              }
+            ]
           }
         }
       }
@@ -124,6 +232,33 @@
                 "enabled": { "const": true }
               }
             }
+          },
+          "if": {
+            "properties": {
+              "xai": {
+                "properties": { "enabled": { "const": true } }
+              }
+            }
+          },
+          "then": {
+            "anyOf": [
+              {
+                "properties": {
+                  "existingSecret": { "minLength": 1 }
+                },
+                "required": ["existingSecret"]
+              },
+              {
+                "properties": {
+                  "xai": {
+                    "properties": {
+                      "apiKey": { "minLength": 1 }
+                    },
+                    "required": ["apiKey"]
+                  }
+                }
+              }
+            ]
           }
         }
       }
