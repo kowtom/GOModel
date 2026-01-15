@@ -138,6 +138,7 @@ helm uninstall gomodel -n gomodel
 ```
 
 # Todo
+
 - Add a values-demo.yaml file with a demo setup ready to run
 - Consider adding prometheus + grafana stack as an optional subchart
-- Ad an example for production ready redis configuration with persistence and authentication enabled
+- Add an example for production-ready redis configuration with persistence and authentication enabled
