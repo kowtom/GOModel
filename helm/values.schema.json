@@ -32,6 +32,9 @@
         "properties": {
           "cache": {
             "properties": { "type": { "const": "redis" } }
+          },
+          "redis": {
+            "properties": { "enabled": { "const": false } }
           }
         }
       },
