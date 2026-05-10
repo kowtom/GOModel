@@ -978,6 +978,268 @@ data: [DONE]
 	}
 }
 
+func TestStreamResponseBuilderChatTextOnly(t *testing.T) {
+	response := buildChatStreamResponseForTest(t,
+		`{"id":"chatcmpl-text","model":"gpt-4o-mini","created":123,"choices":[{"index":0,"delta":{"role":"assistant","content":"Hello"},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-text","model":"gpt-4o-mini","created":123,"choices":[{"index":0,"delta":{"content":" world"},"finish_reason":"stop"}]}`,
+	)
+
+	choice := firstChatStreamChoiceForTest(t, response)
+	message := chatStreamMessageForTest(t, choice)
+	if got := message["content"]; got != "Hello world" {
+		t.Fatalf("message.content = %#v, want Hello world", got)
+	}
+	if _, ok := message["tool_calls"]; ok {
+		t.Fatalf("message.tool_calls present for text-only stream: %#v", message["tool_calls"])
+	}
+	if got := choice["finish_reason"]; got != "stop" {
+		t.Fatalf("finish_reason = %#v, want stop", got)
+	}
+}
+
+func TestStreamResponseBuilderChatToolCallOnly(t *testing.T) {
+	response := buildChatStreamResponseForTest(t,
+		`{"id":"chatcmpl-tools","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":""}}]},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-tools","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\""}}]},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-tools","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\"Paris\"}"}}]},"finish_reason":"tool_calls"}]}`,
+	)
+
+	choice := firstChatStreamChoiceForTest(t, response)
+	message := chatStreamMessageForTest(t, choice)
+	if got := message["content"]; got != nil {
+		t.Fatalf("message.content = %#v, want nil", got)
+	}
+	toolCall := firstChatStreamToolCallForTest(t, message)
+	if _, ok := toolCall["index"]; ok {
+		t.Fatalf("final message tool_call contains streaming index: %#v", toolCall)
+	}
+	if got := toolCall["id"]; got != "call_1" {
+		t.Fatalf("tool_call.id = %#v, want call_1", got)
+	}
+	function := chatStreamFunctionForTest(t, toolCall)
+	if got := function["name"]; got != "get_weather" {
+		t.Fatalf("function.name = %#v, want get_weather", got)
+	}
+	if got := function["arguments"]; got != `{"city":"Paris"}` {
+		t.Fatalf("function.arguments = %#v, want Paris JSON", got)
+	}
+	if got := choice["finish_reason"]; got != "tool_calls" {
+		t.Fatalf("finish_reason = %#v, want tool_calls", got)
+	}
+}
+
+func TestStreamResponseBuilderChatInterleavesTextAndToolCall(t *testing.T) {
+	response := buildChatStreamResponseForTest(t,
+		`{"id":"chatcmpl-mixed","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"role":"assistant","content":"Checking weather.\n"},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-mixed","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\""}}]},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-mixed","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":"Calling tool.","tool_calls":[{"index":0,"function":{"arguments":"Paris\"}"}}]},"finish_reason":"tool_calls"}]}`,
+	)
+
+	choice := firstChatStreamChoiceForTest(t, response)
+	message := chatStreamMessageForTest(t, choice)
+	if got := message["content"]; got != "Checking weather.\nCalling tool." {
+		t.Fatalf("message.content = %#v, want interleaved text", got)
+	}
+	function := chatStreamFunctionForTest(t, firstChatStreamToolCallForTest(t, message))
+	if got := function["arguments"]; got != `{"city":"Paris"}` {
+		t.Fatalf("function.arguments = %#v, want Paris JSON", got)
+	}
+}
+
+func TestStreamResponseBuilderChatParallelToolCalls(t *testing.T) {
+	response := buildChatStreamResponseForTest(t,
+		`{"id":"chatcmpl-parallel","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":1,"id":"call_b","type":"function","function":{"name":"lookup_time","arguments":"{\"city\":\""}},{"index":0,"id":"call_a","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\""}}]},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-parallel","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"Paris\"}"}},{"index":1,"function":{"arguments":"Warsaw\"}"}}]},"finish_reason":"tool_calls"}]}`,
+	)
+
+	message := chatStreamMessageForTest(t, firstChatStreamChoiceForTest(t, response))
+	toolCalls, ok := message["tool_calls"].([]map[string]any)
+	if !ok || len(toolCalls) != 2 {
+		t.Fatalf("tool_calls = %#v, want two tool calls", message["tool_calls"])
+	}
+	if got := toolCalls[0]["id"]; got != "call_a" {
+		t.Fatalf("tool_calls[0].id = %#v, want call_a", got)
+	}
+	if got := toolCalls[1]["id"]; got != "call_b" {
+		t.Fatalf("tool_calls[1].id = %#v, want call_b", got)
+	}
+	if got := chatStreamFunctionForTest(t, toolCalls[0])["arguments"]; got != `{"city":"Paris"}` {
+		t.Fatalf("tool_calls[0].arguments = %#v, want Paris JSON", got)
+	}
+	if got := chatStreamFunctionForTest(t, toolCalls[1])["arguments"]; got != `{"city":"Warsaw"}` {
+		t.Fatalf("tool_calls[1].arguments = %#v, want Warsaw JSON", got)
+	}
+}
+
+func TestStreamResponseBuilderChatSparseChoiceFallbackDoesNotCollide(t *testing.T) {
+	response := buildChatStreamResponseForTest(t,
+		`{"id":"chatcmpl-sparse-choice","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"role":"assistant","content":"zero"},"finish_reason":"stop"},{"index":2,"delta":{"role":"assistant","content":"two"},"finish_reason":"stop"}]}`,
+		`{"id":"chatcmpl-sparse-choice","model":"gpt-4o-mini","choices":[{"delta":{"role":"assistant","content":"synthetic"},"finish_reason":"stop"}]}`,
+	)
+
+	choices := chatStreamChoicesForTest(t, response)
+	if len(choices) != 3 {
+		t.Fatalf("len(choices) = %d, want 3", len(choices))
+	}
+	for i, want := range []int{0, 2, 3} {
+		if got := choices[i]["index"]; got != want {
+			t.Fatalf("choices[%d].index = %#v, want %d", i, got, want)
+		}
+	}
+	if got := chatStreamMessageForTest(t, choices[1])["content"]; got != "two" {
+		t.Fatalf("choices[1].message.content = %#v, want two", got)
+	}
+	if got := chatStreamMessageForTest(t, choices[2])["content"]; got != "synthetic" {
+		t.Fatalf("choices[2].message.content = %#v, want synthetic", got)
+	}
+}
+
+func TestStreamResponseBuilderChatSparseToolCallFallbackDoesNotCollide(t *testing.T) {
+	response := buildChatStreamResponseForTest(t,
+		`{"id":"chatcmpl-sparse-tools","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Paris\"}"}},{"index":2,"id":"call_c","type":"function","function":{"name":"lookup_time","arguments":"{\"city\":\"Warsaw\"}"}}]},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-sparse-tools","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_synthetic","type":"function","function":{"name":"lookup_air","arguments":"{\"city\":\"Berlin\"}"}}]},"finish_reason":"tool_calls"}]}`,
+	)
+
+	message := chatStreamMessageForTest(t, firstChatStreamChoiceForTest(t, response))
+	toolCalls, ok := message["tool_calls"].([]map[string]any)
+	if !ok || len(toolCalls) != 3 {
+		t.Fatalf("tool_calls = %#v, want three tool calls", message["tool_calls"])
+	}
+	for i, want := range []string{"call_a", "call_c", "call_synthetic"} {
+		if got := toolCalls[i]["id"]; got != want {
+			t.Fatalf("tool_calls[%d].id = %#v, want %s", i, got, want)
+		}
+	}
+	if got := chatStreamFunctionForTest(t, toolCalls[1])["arguments"]; got != `{"city":"Warsaw"}` {
+		t.Fatalf("tool_calls[1].arguments = %#v, want Warsaw JSON", got)
+	}
+	if got := chatStreamFunctionForTest(t, toolCalls[2])["arguments"]; got != `{"city":"Berlin"}` {
+		t.Fatalf("tool_calls[2].arguments = %#v, want Berlin JSON", got)
+	}
+}
+
+func TestStreamResponseBuilderChatSkipsToolCallWithoutFunctionDelta(t *testing.T) {
+	response := buildChatStreamResponseForTest(t,
+		`{"id":"chatcmpl-orphan-tool","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_keep","type":"function"},{"index":1,"id":"call_drop","type":"function"}]},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-orphan-tool","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"get_weather","arguments":"{\"city\":\"Paris\"}"}}]},"finish_reason":"tool_calls"}]}`,
+	)
+
+	message := chatStreamMessageForTest(t, firstChatStreamChoiceForTest(t, response))
+	toolCall := firstChatStreamToolCallForTest(t, message)
+	if got := toolCall["id"]; got != "call_keep" {
+		t.Fatalf("tool_call.id = %#v, want call_keep", got)
+	}
+	function := chatStreamFunctionForTest(t, toolCall)
+	if got := function["name"]; got != "get_weather" {
+		t.Fatalf("function.name = %#v, want get_weather", got)
+	}
+	if got := function["arguments"]; got != `{"city":"Paris"}` {
+		t.Fatalf("function.arguments = %#v, want Paris JSON", got)
+	}
+}
+
+func TestStreamResponseBuilderChatCapturesTrailingUsageChunk(t *testing.T) {
+	response := buildChatStreamResponseForTest(t,
+		`{"id":"chatcmpl-usage","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello"},"finish_reason":"stop"}]}`,
+		`{"id":"chatcmpl-usage","model":"gpt-4o-mini","choices":[],"usage":{"prompt_tokens":7,"completion_tokens":2,"total_tokens":9}}`,
+	)
+
+	usage, ok := response["usage"].(map[string]any)
+	if !ok {
+		t.Fatalf("usage = %#v, want object", response["usage"])
+	}
+	if got := usage["prompt_tokens"]; got != float64(7) {
+		t.Fatalf("usage.prompt_tokens = %#v, want 7", got)
+	}
+	if got := usage["completion_tokens"]; got != float64(2) {
+		t.Fatalf("usage.completion_tokens = %#v, want 2", got)
+	}
+	if got := usage["total_tokens"]; got != float64(9) {
+		t.Fatalf("usage.total_tokens = %#v, want 9", got)
+	}
+}
+
+func TestAppendLimitedStreamTextMarksTruncatedWhenBudgetAlreadyFull(t *testing.T) {
+	builder := &streamResponseBuilder{contentLen: MaxContentCapture}
+	var dst strings.Builder
+
+	appendLimitedStreamText(builder, &dst, "x")
+
+	if !builder.truncated {
+		t.Fatal("truncated = false, want true when a non-empty chunk arrives after the capture budget is full")
+	}
+	if got := dst.String(); got != "" {
+		t.Fatalf("captured text = %q, want empty", got)
+	}
+	if got := builder.contentLen; got != MaxContentCapture {
+		t.Fatalf("contentLen = %d, want %d", got, MaxContentCapture)
+	}
+}
+
+func buildChatStreamResponseForTest(t *testing.T, events ...string) map[string]any {
+	t.Helper()
+
+	builder := &streamResponseBuilder{}
+	for _, raw := range events {
+		var event map[string]any
+		if err := json.Unmarshal([]byte(raw), &event); err != nil {
+			t.Fatalf("failed to unmarshal event %q: %v", raw, err)
+		}
+		parseChatCompletionEvent(builder, event)
+	}
+	return builder.buildChatCompletionResponse()
+}
+
+func chatStreamChoicesForTest(t *testing.T, response map[string]any) []map[string]any {
+	t.Helper()
+
+	choices, ok := response["choices"].([]map[string]any)
+	if !ok {
+		t.Fatalf("choices = %#v, want choice slice", response["choices"])
+	}
+	return choices
+}
+
+func firstChatStreamChoiceForTest(t *testing.T, response map[string]any) map[string]any {
+	t.Helper()
+
+	choices := chatStreamChoicesForTest(t, response)
+	if len(choices) != 1 {
+		t.Fatalf("choices = %#v, want one choice", response["choices"])
+	}
+	return choices[0]
+}
+
+func chatStreamMessageForTest(t *testing.T, choice map[string]any) map[string]any {
+	t.Helper()
+
+	message, ok := choice["message"].(map[string]any)
+	if !ok {
+		t.Fatalf("message = %#v, want object", choice["message"])
+	}
+	return message
+}
+
+func firstChatStreamToolCallForTest(t *testing.T, message map[string]any) map[string]any {
+	t.Helper()
+
+	toolCalls, ok := message["tool_calls"].([]map[string]any)
+	if !ok || len(toolCalls) != 1 {
+		t.Fatalf("tool_calls = %#v, want one tool call", message["tool_calls"])
+	}
+	return toolCalls[0]
+}
+
+func chatStreamFunctionForTest(t *testing.T, toolCall map[string]any) map[string]any {
+	t.Helper()
+
+	function, ok := toolCall["function"].(map[string]any)
+	if !ok {
+		t.Fatalf("tool_call.function = %#v, want object", toolCall["function"])
+	}
+	return function
+}
+
 func TestNewStreamLogObserverNilInputs(t *testing.T) {
 	if observer := NewStreamLogObserver(nil, &LogEntry{}, "/v1/chat/completions"); observer != nil {
 		t.Error("expected nil observer with nil logger")
