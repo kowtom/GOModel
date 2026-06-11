@@ -428,9 +428,22 @@ curl -fsS "$BASE_URL/admin/audit/log?limit=5" \
 
 ### S11 Audit conversation endpoint
 
-Reads a conversation thread anchored to the newest audit entry.
+Reads a conversation thread anchored to the newest audit entry. On a fresh
+database the audit log is empty, so the scenario seeds one chat request and
+waits for it to be flushed before anchoring.
 
 ```bash
+if ! curl -fsS "$BASE_URL/admin/audit/log?limit=1" | jq -e '.entries | length >= 1' >/dev/null; then
+  curl -fsS "$BASE_URL/v1/chat/completions" \
+    -H 'Content-Type: application/json' \
+    -d '{"model":"gpt-4.1-nano","messages":[{"role":"user","content":"Reply with exactly QA_AUDIT_SEED_OK"}],"max_tokens":20}' >/dev/null
+  for _ in $(seq 1 10); do
+    if curl -fsS "$BASE_URL/admin/audit/log?limit=1" | jq -e '.entries | length >= 1' >/dev/null; then
+      break
+    fi
+    sleep 1
+  done
+fi
 AUDIT_ID=$(curl -fsS "$BASE_URL/admin/audit/log?limit=1" | jq -er '.entries[0].id')
 curl -fsS "$BASE_URL/admin/audit/conversation?log_id=$AUDIT_ID&limit=5" \
   | jq -e --arg audit_id "$AUDIT_ID" '.anchor_id == $audit_id and (.entries | type == "array" and length >= 1)' >/dev/null
@@ -1162,8 +1175,8 @@ curl -sS -D "$HEADERS_FILE" -o "$BODY_FILE" "$BASE_URL/v1/chat/completions" \
   -d '{"model":"does-not-exist-model","messages":[{"role":"user","content":"Reply with exactly QA_INVALID_MODEL"}],"max_tokens":20}'
 sed -n '1,20p' "$HEADERS_FILE"
 jq '.' "$BODY_FILE"
-grep -Eiq '^HTTP/.* 400 ' "$HEADERS_FILE"
-jq -e '.error.type == "invalid_request_error"' "$BODY_FILE" >/dev/null
+grep -Eiq '^HTTP/.* 404 ' "$HEADERS_FILE"
+jq -e '.error.type == "not_found_error" and .error.code == "model_not_found"' "$BODY_FILE" >/dev/null
 sleep 6
 AUDIT_JSON_FILE="$QA_RUN_DIR/s61.audit.json"
 curl -fsS "$BASE_URL/admin/audit/log?search=$REQUEST_ID&limit=5" > "$AUDIT_JSON_FILE"
@@ -1173,8 +1186,8 @@ jq -e --arg request_id "$REQUEST_ID" '
       .request_id == $request_id
       and .path == "/v1/chat/completions"
       and .requested_model == "does-not-exist-model"
-      and .status_code == 400
-      and .error_type == "invalid_request_error"
+      and .status_code == 404
+      and .error_type == "not_found_error"
     )
   ' "$AUDIT_JSON_FILE" >/dev/null
 ```
@@ -2118,7 +2131,7 @@ jq -e '.type == "error" and .error.type == "invalid_request_error" and (.error.m
 
 ### S107 Unknown model is rejected with an Anthropic error envelope (negative)
 
-Checks that an unresolvable model produces a `400` Anthropic error envelope.
+Checks that an unresolvable model produces a `404` Anthropic error envelope.
 
 ```bash
 HEADERS_FILE=$(mktemp "$QA_RUN_DIR/s107.headers.XXXXXX")
@@ -2128,8 +2141,8 @@ curl -sS -D "$HEADERS_FILE" -o "$BODY_FILE" "$BASE_URL/v1/messages" \
   -d '{"model":"does-not-exist-model","max_tokens":16,"messages":[{"role":"user","content":"Hi"}]}'
 sed -n '1,20p' "$HEADERS_FILE"
 jq '.' "$BODY_FILE"
-grep -Eiq '^HTTP/.* 400 ' "$HEADERS_FILE"
-jq -e '.type == "error" and .error.type == "invalid_request_error" and (.error.message | test("does-not-exist-model|model"; "i"))' "$BODY_FILE" >/dev/null
+grep -Eiq '^HTTP/.* 404 ' "$HEADERS_FILE"
+jq -e '.type == "error" and .error.type == "not_found_error" and (.error.message | test("does-not-exist-model|model"; "i"))' "$BODY_FILE" >/dev/null
 ```
 
 ### S108 Unsupported content block type is rejected (negative)
