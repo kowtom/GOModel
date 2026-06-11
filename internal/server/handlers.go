@@ -35,12 +35,13 @@ type Handler struct {
 	batchStore                      batchstore.Store
 	fileStore                       filestore.Store
 	responseStore                   responsestore.Store
-	responseStoreMu                 sync.RWMutex
-	conversationStore               conversationstore.Store
-	normalizePassthroughV1Prefix    bool
-	enabledPassthroughProviders     map[string]struct{}
-	responseCache                   *responsecache.ResponseCacheMiddleware
-	guardrailsHash                  string
+	// storesMu guards responseStore, conversationStore, and translatedSvc wiring.
+	storesMu                     sync.RWMutex
+	conversationStore            conversationstore.Store
+	normalizePassthroughV1Prefix bool
+	enabledPassthroughProviders  map[string]struct{}
+	responseCache                *responsecache.ResponseCacheMiddleware
+	guardrailsHash               string
 
 	translatedSvc     *translatedInferenceService // snapshot of handler fields at first use; server.New sets cache/hash before traffic
 	translatedSvcOnce sync.Once
@@ -134,8 +135,8 @@ func (h *Handler) SetResponseStore(store responsestore.Store) {
 	if store == nil {
 		return
 	}
-	h.responseStoreMu.Lock()
-	defer h.responseStoreMu.Unlock()
+	h.storesMu.Lock()
+	defer h.storesMu.Unlock()
 	h.responseStore = store
 	if h.translatedSvc != nil {
 		h.translatedSvc.setResponseStore(store)
@@ -143,13 +144,18 @@ func (h *Handler) SetResponseStore(store responsestore.Store) {
 }
 
 // SetConversationStore replaces the conversation store used by the
-// Conversations lifecycle endpoints.
+// Conversations lifecycle endpoints and by /v1/responses conversation turns.
 // nil is ignored to keep an always-available fallback memory store.
 func (h *Handler) SetConversationStore(store conversationstore.Store) {
 	if store == nil {
 		return
 	}
+	h.storesMu.Lock()
+	defer h.storesMu.Unlock()
 	h.conversationStore = store
+	if h.translatedSvc != nil {
+		h.translatedSvc.setConversationStore(store)
+	}
 }
 
 func (h *Handler) translatedInference() *translatedInferenceService {
@@ -170,13 +176,14 @@ func (h *Handler) translatedInference() *translatedInferenceService {
 			responseStore:            h.currentResponseStore(),
 		}
 		s.initHandlers()
-		h.responseStoreMu.Lock()
+		h.storesMu.Lock()
 		s.setResponseStore(h.responseStore)
+		s.setConversationStore(h.conversationStore)
 		h.translatedSvc = s
-		h.responseStoreMu.Unlock()
+		h.storesMu.Unlock()
 	})
-	h.responseStoreMu.RLock()
-	defer h.responseStoreMu.RUnlock()
+	h.storesMu.RLock()
+	defer h.storesMu.RUnlock()
 	return h.translatedSvc
 }
 
@@ -231,12 +238,14 @@ func (h *Handler) nativeResponses() *nativeResponseService {
 }
 
 func (h *Handler) conversations() *conversationService {
+	h.storesMu.RLock()
+	defer h.storesMu.RUnlock()
 	return &conversationService{conversationStore: h.conversationStore}
 }
 
 func (h *Handler) currentResponseStore() responsestore.Store {
-	h.responseStoreMu.RLock()
-	defer h.responseStoreMu.RUnlock()
+	h.storesMu.RLock()
+	defer h.storesMu.RUnlock()
 	return h.responseStore
 }
 
