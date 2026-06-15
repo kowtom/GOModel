@@ -86,6 +86,10 @@ load_env() {
   [[ -n "${GOMODEL_MASTER_KEY:-}" ]] || die "GOMODEL_MASTER_KEY must be set in $ENV_FILE"
 
   export REDIS_URL="${REDIS_URL:-redis://localhost:6379}"
+  export CONFIGURED_PROVIDER_MODELS_MODE="${CONFIGURED_PROVIDER_MODELS_MODE:-allowlist}"
+  export XAI_MODELS="${XAI_MODELS:-grok-4.3,grok-voice-latest}"
+  export BAILIAN_MODELS="${BAILIAN_MODELS:-qwen3-omni-flash-realtime}"
+  export ENABLED_PASSTHROUGH_PROVIDERS="${ENABLED_PASSTHROUGH_PROVIDERS:-openai,anthropic,openrouter,zai,vllm,deepseek,bailian,xai}"
 }
 
 ensure_binary() {

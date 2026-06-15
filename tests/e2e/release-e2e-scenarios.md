@@ -1,6 +1,6 @@
 # Release E2E Curl Matrix
 
-This file contains 114 end-to-end curl scenarios for release validation.
+This file contains 117 end-to-end curl scenarios for release validation.
 These scenarios are prepared for execution across these local gateways:
 
 - `http://localhost:18080` - SQLite-backed main test gateway
@@ -43,6 +43,9 @@ Stateful note:
   (`POST /v1/audio/speech`, `POST /v1/audio/transcriptions`); each generates its
   own input audio under `QA_RUN_DIR`, so they are self-contained and can be rerun
   in any order
+- `S115`-`S117` exercise the realtime voice websocket endpoint with curl
+  upgrade handshakes across OpenAI, xAI, and Bailian; they are self-contained
+  and can be rerun in any order
 - For stateful partial reruns, prefer a contiguous range that includes the
   prerequisite setup scenarios, or rerun with the same `--qa-suffix` and
   `--keep-artifacts`
@@ -162,6 +165,38 @@ assert_responses_stream_contains() {
       and ([.[] | select(.type == "response.output_text.delta") | .delta] | join("") | contains($expected))
       and any(.[]; (.type == "response.completed" or .type == "response.done") and ((.response.usage.total_tokens // .usage.total_tokens // 0) > 0))
     ' >/dev/null
+}
+
+assert_realtime_websocket_upgrade() {
+  local url="$1"
+  local headers_file="$2"
+  local body_file="$3"
+  local request_id="$4"
+  local stderr_file="$5"
+  local curl_exit=0
+
+  curl -sS --http1.1 --max-time "${QA_REALTIME_CURL_MAX_TIME:-12}" \
+    -D "$headers_file" \
+    -o "$body_file" \
+    -H 'Connection: Upgrade' \
+    -H 'Upgrade: websocket' \
+    -H 'Sec-WebSocket-Version: 13' \
+    -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+    -H "X-Request-ID: $request_id" \
+    "$url" \
+    2> "$stderr_file" || curl_exit=$?
+
+  if [[ "$curl_exit" -ne 0 && "$curl_exit" -ne 28 ]]; then
+    cat "$stderr_file" >&2
+    echo "error: realtime curl exited with $curl_exit" >&2
+    exit 1
+  fi
+
+  sed -n '1,20p' "$headers_file"
+  grep -Eiq '^HTTP/.* 101 ' "$headers_file"
+  grep -Eiq '^upgrade: *websocket' "$headers_file"
+  grep -Eiq '^connection: *upgrade' "$headers_file"
+  grep -Eiq '^sec-websocket-accept: *[A-Za-z0-9+/=]+' "$headers_file"
 }
 
 assert_embeddings_response() {
@@ -2293,4 +2328,62 @@ sed -n '1,20p' "$HEADERS_FILE"
 jq '.' "$BODY_FILE"
 grep -Eiq '^HTTP/.* 404 ' "$HEADERS_FILE"
 jq -e '.error.type == "not_found_error"' "$BODY_FILE" >/dev/null
+```
+
+### S115 Realtime websocket upgrade on OpenAI
+
+Checks `GET /v1/realtime`: curl performs a websocket upgrade handshake for an
+OpenAI realtime voice model. The gateway dials upstream before accepting the
+client, so a `101 Switching Protocols` response confirms model routing and
+credential injection both worked.
+
+```bash
+REQUEST_ID="qa-realtime-openai-$QA_SUFFIX"
+HEADERS_FILE=$(mktemp "$QA_RUN_DIR/s115.headers.XXXXXX")
+BODY_FILE=$(mktemp "$QA_RUN_DIR/s115.body.XXXXXX")
+STDERR_FILE=$(mktemp "$QA_RUN_DIR/s115.stderr.XXXXXX")
+assert_realtime_websocket_upgrade \
+  "$BASE_URL/v1/realtime?model=gpt-realtime-mini&provider=openai" \
+  "$HEADERS_FILE" \
+  "$BODY_FILE" \
+  "$REQUEST_ID" \
+  "$STDERR_FILE"
+```
+
+### S116 Realtime websocket upgrade on xAI
+
+Checks the xAI Grok Voice realtime API through the OpenAI-compatible realtime
+entry point. The release stack configures `grok-voice-latest` explicitly because
+xAI voice models are not reliably discoverable from `/models`.
+
+```bash
+REQUEST_ID="qa-realtime-xai-$QA_SUFFIX"
+HEADERS_FILE=$(mktemp "$QA_RUN_DIR/s116.headers.XXXXXX")
+BODY_FILE=$(mktemp "$QA_RUN_DIR/s116.body.XXXXXX")
+STDERR_FILE=$(mktemp "$QA_RUN_DIR/s116.stderr.XXXXXX")
+assert_realtime_websocket_upgrade \
+  "$BASE_URL/v1/realtime?model=grok-voice-latest&provider=xai" \
+  "$HEADERS_FILE" \
+  "$BODY_FILE" \
+  "$REQUEST_ID" \
+  "$STDERR_FILE"
+```
+
+### S117 Realtime websocket upgrade on Bailian passthrough
+
+Checks the provider-native realtime passthrough route for Alibaba Cloud Bailian
+/ DashScope Qwen-Omni. The websocket event schema is relayed verbatim while the
+gateway injects the Bailian bearer token.
+
+```bash
+REQUEST_ID="qa-realtime-bailian-$QA_SUFFIX"
+HEADERS_FILE=$(mktemp "$QA_RUN_DIR/s117.headers.XXXXXX")
+BODY_FILE=$(mktemp "$QA_RUN_DIR/s117.body.XXXXXX")
+STDERR_FILE=$(mktemp "$QA_RUN_DIR/s117.stderr.XXXXXX")
+assert_realtime_websocket_upgrade \
+  "$BASE_URL/p/bailian/v1/realtime?model=qwen3-omni-flash-realtime" \
+  "$HEADERS_FILE" \
+  "$BODY_FILE" \
+  "$REQUEST_ID" \
+  "$STDERR_FILE"
 ```
