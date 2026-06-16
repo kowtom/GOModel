@@ -1,0 +1,61 @@
+---
+title: "CLI Operations"
+description: "Command-line flags for inspecting the GoModel binary and probing a running gateway's health."
+icon: "terminal"
+---
+
+## Overview
+
+The `gomodel` binary exposes a small set of command-line flags for operational
+tasks. Flags accept both single-dash (`-flag`) and double-dash (`--flag`) forms;
+the examples below use the long form.
+
+| Flag               | Description                                              | Default |
+| ------------------ | ------------------------------------------------------- | ------- |
+| `--version`        | Print version information and exit                       | —       |
+| `--health`         | Probe the local `/health` endpoint and exit             | —       |
+| `--health-timeout` | Maximum time to wait for the `--health` probe            | `2s`    |
+
+## Version
+
+Print the build version and exit:
+
+```bash
+gomodel --version
+```
+
+## Health probe
+
+`--health` makes the binary act as a health-check client: it loads the same
+configuration as the server, requests the local `/health` endpoint, and exits.
+
+```bash
+gomodel --health
+```
+
+- Exits `0` when the endpoint returns HTTP `200` with `{"status":"ok"}`.
+- Exits non-zero otherwise (connection refused, non-`200` status, or any other
+  status value).
+
+The probe always targets the loopback interface (`127.0.0.1`) since it runs
+inside the same container as the server, but it derives the `PORT` and
+`BASE_PATH` from configuration instead of hardcoding `8080` and `/health`. Bound
+the request with `--health-timeout`:
+
+```bash
+gomodel --health --health-timeout 5s
+```
+
+### Docker `HEALTHCHECK`
+
+Because the probe is built into the binary, container images can report health
+without shipping `curl` or `wget` — useful for minimal/distroless runtimes. The
+official image wires it up automatically:
+
+```dockerfile
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD ["/gomodel", "--health"]
+```
+
+Orchestrators (Docker, Compose, Kubernetes) can then detect and restart an
+unhealthy gateway.
