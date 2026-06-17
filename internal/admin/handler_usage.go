@@ -18,6 +18,11 @@ import (
 // matches the value documented in the @Param limit annotation below.
 const maxUsageLogLimit = 200
 
+// defaultUsageLogLimit is the effective page size when the caller omits limit.
+// It mirrors the reader's pagination default so the disabled-reader fast path
+// reports the same limit an enabled reader would.
+const defaultUsageLogLimit = 50
+
 // UsageSummary handles GET /admin/usage/summary
 //
 // @Summary      Get usage summary
@@ -200,8 +205,17 @@ func (h *Handler) UsageLog(c *echo.Context) error {
 	}
 
 	if h.usageReader == nil {
+		// Echo the effective pagination so the response matches the enabled-reader
+		// contract. Returning limit:0 here would make the client send limit=0 on
+		// its next request, which fails validation above with a 400.
+		limit := params.Limit
+		if limit <= 0 {
+			limit = defaultUsageLogLimit
+		}
 		return c.JSON(http.StatusOK, usage.UsageLogResult{
 			Entries: []usage.UsageLogEntry{},
+			Limit:   limit,
+			Offset:  params.Offset,
 		})
 	}
 

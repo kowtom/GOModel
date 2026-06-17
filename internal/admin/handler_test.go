@@ -594,6 +594,9 @@ func TestUsageByUserPath_Error(t *testing.T) {
 
 func TestUsageLog_NilReader(t *testing.T) {
 	h := NewHandler(nil, nil)
+	// Omit limit, as a paging client's first request may. The disabled-reader
+	// path must report the default page size (not 0) so the client never resends
+	// limit=0 (which 400s).
 	c, rec := newHandlerContext("/admin/usage/log")
 
 	if err := h.UsageLog(c); err != nil {
@@ -609,6 +612,12 @@ func TestUsageLog_NilReader(t *testing.T) {
 	}
 	if len(result.Entries) != 0 {
 		t.Errorf("expected 0 entries, got %d", len(result.Entries))
+	}
+	if result.Offset != 0 {
+		t.Errorf("expected echoed offset 0, got %d", result.Offset)
+	}
+	if result.Limit != 50 {
+		t.Errorf("expected default echoed limit 50, got %d", result.Limit)
 	}
 }
 
@@ -746,6 +755,9 @@ func TestUsageLog_WithFilters(t *testing.T) {
 
 func TestAuditLog_NilReader(t *testing.T) {
 	h := NewHandler(nil, nil)
+	// Omit limit, as a paging client's first request may. The disabled-reader
+	// path must report the default page size (not 0) so the client never resends
+	// limit=0 (which 400s).
 	c, rec := newHandlerContext("/admin/audit/log")
 
 	if err := h.AuditLog(c); err != nil {
@@ -761,6 +773,12 @@ func TestAuditLog_NilReader(t *testing.T) {
 	}
 	if len(result.Entries) != 0 {
 		t.Errorf("expected 0 entries, got %d", len(result.Entries))
+	}
+	if result.Offset != 0 {
+		t.Errorf("expected echoed offset 0, got %d", result.Offset)
+	}
+	if result.Limit != 25 {
+		t.Errorf("expected default echoed limit 25, got %d", result.Limit)
 	}
 }
 
