@@ -30,7 +30,12 @@ const (
 		"data: [DONE]\n\n"
 )
 
-type benchProvider struct{}
+// benchProvider is a mock provider. When models is empty it advertises a single
+// default model; otherwise ListModels returns the supplied catalog so the
+// registry/router resolution path can be exercised at a realistic catalog size.
+type benchProvider struct {
+	models []core.Model
+}
 
 func (benchProvider) ChatCompletion(_ context.Context, req *core.ChatRequest) (*core.ChatResponse, error) {
 	model := "gpt-4o-mini"
@@ -66,7 +71,10 @@ func (benchProvider) StreamChatCompletion(_ context.Context, _ *core.ChatRequest
 	return io.NopCloser(strings.NewReader(sampleChatStream)), nil
 }
 
-func (benchProvider) ListModels(_ context.Context) (*core.ModelsResponse, error) {
+func (p benchProvider) ListModels(_ context.Context) (*core.ModelsResponse, error) {
+	if len(p.models) > 0 {
+		return &core.ModelsResponse{Object: "list", Data: p.models}, nil
+	}
 	return &core.ModelsResponse{
 		Object: "list",
 		Data: []core.Model{
@@ -169,8 +177,73 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+// BenchmarkGatewayHotPathChatCompletion measures the pipeline overhead with a
+// bare provider (no Router/registry). It isolates serialization + middleware
+// cost; it does NOT cover model resolution. See the Routed variant for the
+// production-shaped path.
 func BenchmarkGatewayHotPathChatCompletion(b *testing.B) {
 	srv := server.New(benchProvider{}, &server.Config{LogOnlyModelInteractions: true})
+	body := []byte(sampleChatRequest)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			b.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+		}
+	}
+}
+
+// routedCatalogSize is a representative multi-provider catalog size. Real
+// deployments aggregating several upstreams routinely exceed this.
+const routedCatalogSize = 256
+
+// newRoutedBenchServer wires the server the way production does: through a real
+// ModelRegistry + Router populated with `modelCount` models. Unlike passing a
+// bare provider to server.New, this exercises the per-request model-resolution
+// path (ResolveModel/Supports/GetProviderType/GetProviderName), which is where
+// catalog-sized allocation and CPU cost actually live.
+func newRoutedBenchServer(tb testing.TB, modelCount int) *server.Server {
+	tb.Helper()
+
+	models := make([]core.Model, 0, modelCount)
+	models = append(models, core.Model{ID: "gpt-4o-mini", Object: "model", OwnedBy: "mock", Created: 1700000000})
+	for i := 1; i < modelCount; i++ {
+		models = append(models, core.Model{
+			ID:      fmt.Sprintf("filler-model-%04d", i),
+			Object:  "model",
+			OwnedBy: "mock",
+			Created: 1700000000,
+		})
+	}
+
+	registry := providers.NewModelRegistry()
+	registry.RegisterProviderWithNameAndType(&benchProvider{models: models}, "mock", "mock")
+	if err := registry.Initialize(context.Background()); err != nil {
+		tb.Fatalf("registry initialize: %v", err)
+	}
+
+	router, err := providers.NewRouter(registry)
+	if err != nil {
+		tb.Fatalf("new router: %v", err)
+	}
+
+	return server.New(router, &server.Config{LogOnlyModelInteractions: true})
+}
+
+// BenchmarkGatewayHotPathChatCompletionRouted measures the hot path through a
+// real Router with a realistic catalog. Compare against
+// BenchmarkGatewayHotPathChatCompletion (bare provider, no routing) to see the
+// cost the routing/resolution layer adds per request.
+func BenchmarkGatewayHotPathChatCompletionRouted(b *testing.B) {
+	srv := newRoutedBenchServer(b, routedCatalogSize)
 	body := []byte(sampleChatRequest)
 
 	b.ReportAllocs()
@@ -285,9 +358,12 @@ func formatPerfGuardResult(name string, result testing.BenchmarkResult, maxAlloc
 func TestHotPathPerfGuard(t *testing.T) {
 	t.Helper()
 
-	// These ceilings are intentionally generous. They are here to catch obvious
-	// allocation regressions in the hottest code paths, not to freeze the exact
-	// current profile.
+	// Ceilings sit ~10% above the measured baseline: tight enough to catch real
+	// allocation regressions, loose enough to absorb minor Go/dependency drift.
+	// Allocation counts here are deterministic and match across architectures
+	// (linux/amd64 CI == darwin/arm64 local), so these are stable. When a change
+	// legitimately adds allocations, re-measure with `make perf-bench` and bump
+	// the affected ceiling in the same commit.
 	cases := []struct {
 		name      string
 		bench     func(*testing.B)
@@ -297,20 +373,31 @@ func TestHotPathPerfGuard(t *testing.T) {
 		{
 			name:      "gateway_chat_completion_hot_path",
 			bench:     BenchmarkGatewayHotPathChatCompletion,
-			maxAllocs: 125,
-			maxBytes:  15 * 1024,
+			maxAllocs: 120, // baseline 113
+			maxBytes:  15 * 1024, // baseline ~13.9 KB
+		},
+		{
+			// Production-shaped path: request resolves through a real Router +
+			// catalog. Resolution uses an O(1) selector index, so the ceilings
+			// sit close to the bare-provider case and are independent of catalog
+			// size. A regression to catalog-scanning resolution (which copied the
+			// full catalog several times per request) would blow these limits.
+			name:      "gateway_chat_completion_hot_path_routed",
+			bench:     BenchmarkGatewayHotPathChatCompletionRouted,
+			maxAllocs: 150, // baseline 137
+			maxBytes:  16 * 1024, // baseline ~14.7 KB
 		},
 		{
 			name:      "openai_responses_stream_converter",
 			bench:     BenchmarkOpenAIResponsesStreamConverter,
-			maxAllocs: 310,
-			maxBytes:  25 * 1024,
+			maxAllocs: 222, // baseline 202
+			maxBytes:  22 * 1024, // baseline ~19.6 KB
 		},
 		{
 			name:      "shared_stream_audit_and_usage_observers",
 			bench:     BenchmarkSharedStreamingAuditAndUsageObservers,
-			maxAllocs: 170,
-			maxBytes:  9 * 1024,
+			maxAllocs: 170, // baseline 159; already tight, no headroom to trim
+			maxBytes:  9 * 1024, // baseline ~8.9 KB; already tight
 		},
 	}
 

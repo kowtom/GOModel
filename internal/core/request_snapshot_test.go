@@ -71,20 +71,24 @@ func TestNewRequestSnapshot_DefensivelyCopiesMutableFields(t *testing.T) {
 	}
 }
 
-func TestNewRequestSnapshotWithOwnedBody_TakesOwnershipOfCapturedBytes(t *testing.T) {
+func TestNewRequestSnapshotWithOwnedMaps_TakesOwnershipOfCapturedBytes(t *testing.T) {
+	routeParams := map[string]string{"provider": "openai"}
+	queryParams := map[string][]string{"limit": {"5"}}
+	headers := map[string][]string{"X-Test": {"a"}}
+	traceMetadata := map[string]string{"Traceparent": "trace-1"}
 	rawBody := []byte(`{"model":"gpt-5-mini"}`)
 
-	snapshot := NewRequestSnapshotWithOwnedBody(
+	snapshot := NewRequestSnapshotWithOwnedMaps(
 		"POST",
 		"/v1/chat/completions",
-		nil,
-		nil,
-		nil,
+		routeParams,
+		queryParams,
+		headers,
 		"application/json",
 		rawBody,
 		false,
 		"req-123",
-		nil,
+		traceMetadata,
 		"/team/a",
 	)
 
@@ -103,6 +107,28 @@ func TestNewRequestSnapshotWithOwnedBody_TakesOwnershipOfCapturedBytes(t *testin
 	if &clonedBody[0] == &rawBody[0] {
 		t.Fatal("CapturedBody returned owned bytes directly, want defensive copy")
 	}
+
+	// Route/query/trace maps are owned: mutating the caller's map is visible
+	// through the snapshot (no defensive copy was taken at construction).
+	routeParams["provider"] = "anthropic"
+	if got := snapshot.GetRouteParams()["provider"]; got != "anthropic" {
+		t.Fatalf("route params not owned: provider = %q, want anthropic", got)
+	}
+	queryParams["limit"] = []string{"9"}
+	if got := snapshot.GetQueryParams()["limit"]; len(got) != 1 || got[0] != "9" {
+		t.Fatalf("query params not owned: limit = %v, want [9]", got)
+	}
+	traceMetadata["Traceparent"] = "trace-2"
+	if got := snapshot.GetTraceMetadata()["Traceparent"]; got != "trace-2" {
+		t.Fatalf("trace metadata not owned: Traceparent = %q, want trace-2", got)
+	}
+
+	// Headers are still defensively cloned: mutating the caller's map after
+	// construction must not affect the snapshot.
+	headers["X-Test"] = []string{"b"}
+	if got := snapshot.HeadersView()["X-Test"]; len(got) != 1 || got[0] != "a" {
+		t.Fatalf("headers not cloned: X-Test = %v, want [a]", got)
+	}
 }
 
 func BenchmarkNewRequestSnapshotClonedBody(b *testing.B) {
@@ -114,12 +140,12 @@ func BenchmarkNewRequestSnapshotClonedBody(b *testing.B) {
 	}
 }
 
-func BenchmarkNewRequestSnapshotWithOwnedBody(b *testing.B) {
+func BenchmarkNewRequestSnapshotWithOwnedMaps(b *testing.B) {
 	body := []byte(`{"model":"gpt-5-mini","messages":[{"role":"user","content":"hello world"}],"response_format":{"type":"json_schema"}}`)
 
 	b.ReportAllocs()
 	for b.Loop() {
-		_ = NewRequestSnapshotWithOwnedBody("POST", "/v1/chat/completions", nil, nil, nil, "application/json", body, false, "req-123", nil)
+		_ = NewRequestSnapshotWithOwnedMaps("POST", "/v1/chat/completions", nil, nil, nil, "application/json", body, false, "req-123", nil)
 	}
 }
 
