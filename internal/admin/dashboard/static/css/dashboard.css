@@ -1799,7 +1799,6 @@ td.col-price {
   flex: 0 0 32px;
 }
 
-.model-list-actions .model-access-state-badge,
 .model-list-actions .alias-toggle {
   flex: 0 0 auto;
 }
@@ -1861,6 +1860,17 @@ td.col-price {
 .alias-toggle.enabled .alias-toggle-thumb {
   transform: translateX(14px);
   background: #fff;
+}
+
+/* Restricted: an enabled model scoped to specific user paths. Reuses the
+   accent color of the former access-state pill, on the toggle itself. */
+.alias-toggle.restricted {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+  color: color-mix(in srgb, var(--accent) 70%, var(--text));
+}
+
+.alias-toggle.restricted .alias-toggle-track {
+  background: color-mix(in srgb, var(--accent) 55%, var(--bg));
 }
 
 .editor-header {
@@ -2001,38 +2011,6 @@ textarea:focus {
 
 .model-row-actions-empty {
   color: var(--text-muted);
-}
-
-.model-access-state-badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 5px 10px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: var(--bg);
-  color: var(--text);
-  font-size: 12px;
-  line-height: 1;
-  white-space: nowrap;
-}
-
-.model-access-state-badge:empty {
-  display: none;
-}
-
-.model-access-state-badge.is-enabled {
-  border-color: color-mix(in srgb, var(--success) 40%, var(--border));
-  color: color-mix(in srgb, var(--success) 70%, var(--text));
-}
-
-.model-access-state-badge.is-restricted {
-  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
-  color: color-mix(in srgb, var(--accent) 70%, var(--text));
-}
-
-.model-access-state-badge.is-disabled {
-  border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
-  color: color-mix(in srgb, var(--danger) 70%, var(--text));
 }
 
 .data-table tr.alias-row.is-valid td {

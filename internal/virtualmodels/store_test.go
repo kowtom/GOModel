@@ -3,6 +3,7 @@ package virtualmodels
 import (
 	"context"
 	"errors"
+	"math"
 	"testing"
 )
 
@@ -82,5 +83,46 @@ func TestSQLiteStore_GetMissingAndDelete(t *testing.T) {
 	}
 	if _, err := store.Get(ctx, "x"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Get(deleted) error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestSQLiteStore_UpsertAllIsAtomic(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	vms := []VirtualModel{
+		{Source: "fast", Targets: []Target{{Provider: "openai", Model: "gpt-4o"}}, Enabled: true},
+		{Source: "openai/gpt-4o", Enabled: false},
+	}
+
+	// Success: the whole batch is committed.
+	store := newSQLiteVMStore(t)
+	if err := store.UpsertAll(ctx, vms); err != nil {
+		t.Fatalf("UpsertAll() error = %v", err)
+	}
+	got, err := store.List(ctx)
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len(List()) = %d, want 2", len(got))
+	}
+
+	// Mid-batch failure: the first row is written inside the transaction, then the
+	// second row fails to encode (a non-finite Weight cannot be JSON-marshalled).
+	// The whole batch must roll back — the first row must not survive.
+	store2 := newSQLiteVMStore(t)
+	err = store2.UpsertAll(ctx, []VirtualModel{
+		{Source: "good", Targets: []Target{{Provider: "openai", Model: "gpt-4o"}}, Enabled: true},
+		{Source: "bad", Targets: []Target{{Provider: "openai", Model: "gpt-4o", Weight: math.Inf(1)}}, Enabled: true},
+	})
+	if err == nil {
+		t.Fatal("UpsertAll(mid-batch failure) error = nil, want error")
+	}
+	got2, err := store2.List(ctx)
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(got2) != 0 {
+		t.Fatalf("len(List()) = %d after mid-batch failure, want 0 (atomic rollback)", len(got2))
 	}
 }
