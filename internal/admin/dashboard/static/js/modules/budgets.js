@@ -373,9 +373,12 @@
             },
 
             budgetAmountLabel(value) {
+                if (value == null) {
+                    return '---';
+                }
                 const amount = Number(value);
                 if (!Number.isFinite(amount)) {
-                    return 'N/A';
+                    return '---';
                 }
                 if (typeof this.formatCost === 'function') {
                     return this.formatCost(amount);

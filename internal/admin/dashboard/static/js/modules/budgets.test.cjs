@@ -100,6 +100,14 @@ test('budgetFormPayload normalizes user path and standard periods', () => {
     }));
 });
 
+test('budgetAmountLabel uses data placeholder for invalid amounts', () => {
+    const module = createBudgetsModule();
+
+    assert.equal(module.budgetAmountLabel(null), '---');
+    assert.equal(module.budgetAmountLabel(undefined), '---');
+    assert.equal(module.budgetAmountLabel('abc'), '---');
+});
+
 test('setBudgetFormUserPath keeps the form input controlled with a leading slash', () => {
     const module = createBudgetsModule();
 
