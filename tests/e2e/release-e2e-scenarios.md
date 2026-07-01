@@ -1345,7 +1345,7 @@ Creates a scoped workflow for `openai/gpt-4.1-nano` that disables cache for the 
 curl -fsS -X POST "$AUTH_BASE_URL/admin/workflows" \
   -H "$ADMIN_AUTH_HEADER" \
   -H 'Content-Type: application/json' \
-  -d "{\"scope_provider\":\"openai\",\"scope_model\":\"gpt-4.1-nano\",\"scope_user_path\":\"$QA_USER_PATH\",\"name\":\"$QA_WORKFLOW_NAME\",\"description\":\"Disable cache for managed-key release e2e scope\",\"workflow_payload\":{\"schema_version\":1,\"features\":{\"cache\":false,\"audit\":true,\"usage\":true,\"guardrails\":false,\"fallback\":false},\"guardrails\":[]}}" \
+  -d "{\"scope_provider\":\"openai\",\"scope_model\":\"gpt-4.1-nano\",\"scope_user_path\":\"$QA_USER_PATH\",\"name\":\"$QA_WORKFLOW_NAME\",\"description\":\"Disable cache for managed-key release e2e scope\",\"workflow_payload\":{\"schema_version\":1,\"features\":{\"cache\":false,\"audit\":true,\"usage\":true,\"guardrails\":false,\"failover\":false},\"guardrails\":[]}}" \
   > "$QA_WORKFLOW_JSON"
 if ! jq -er '.id | select(type == "string" and length > 0)' "$QA_WORKFLOW_JSON" > "$QA_WORKFLOW_ID_FILE"; then
   echo "error: workflow creation failed or did not return a usable workflow id" >&2
@@ -1356,7 +1356,7 @@ require_release_artifact "$QA_WORKFLOW_JSON"
 require_release_artifact "$QA_WORKFLOW_ID_FILE"
 jq -e --arg user_path "$QA_USER_PATH" '
     {id,name,scope,workflow_payload}
-    | select(.id != null and .scope.scope_user_path == $user_path and .workflow_payload.features.cache == false)
+    | select(.id != null and .scope.scope_user_path == $user_path and .workflow_payload.features.cache == false and .workflow_payload.features.failover == false)
   ' "$QA_WORKFLOW_JSON"
 ```
 
@@ -1376,6 +1376,8 @@ jq -e --arg workflow_id "$WORKFLOW_ID" --arg user_path "$QA_USER_PATH" '
     .id == $workflow_id
     and .scope.scope_user_path == $user_path
     and .effective_features.cache == false
+    and .workflow_payload.features.failover == false
+    and .effective_features.failover == false
   ' "$WORKFLOW_DETAIL_FILE" >/dev/null
 ```
 
