@@ -10,6 +10,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/goccy/go-json"
+
+	"gomodel/internal/core"
 )
 
 // LogStore defines the interface for audit log storage backends.
@@ -109,6 +111,9 @@ type LogData struct {
 	// Identity
 	UserAgent  string `json:"user_agent,omitempty" bson:"user_agent,omitempty"`
 	APIKeyHash string `json:"api_key_hash,omitempty" bson:"api_key_hash,omitempty"`
+
+	// Labels are request labels extracted from configured tagging headers.
+	Labels []string `json:"labels,omitempty" bson:"labels,omitempty"`
 
 	// WorkflowFeatures captures the request-time effective workflow features
 	// after runtime caps were applied. This keeps audit views historically accurate
@@ -291,32 +296,9 @@ func displayAuditProviderName(providerName, provider string) string {
 	return strings.TrimSpace(provider)
 }
 
-// RedactedHeaders contains headers that should be automatically redacted.
-// Values are replaced with "[REDACTED]" to prevent leaking secrets.
-var RedactedHeaders = []string{
-	"authorization",
-	"x-api-key",
-	"api-key",        // Azure OpenAI credential header
-	"x-goog-api-key", // Google Gemini / Vertex credential header
-	"cookie",
-	"set-cookie",
-	"x-auth-token",
-	"x-access-token",
-	"proxy-authorization",
-	"x-gomodel-key",
-}
-
-// redactedHeadersSet is built once at package init for O(1) lookups.
-var redactedHeadersSet = func() map[string]struct{} {
-	set := make(map[string]struct{}, len(RedactedHeaders))
-	for _, h := range RedactedHeaders {
-		set[h] = struct{}{}
-	}
-	return set
-}()
-
-// RedactHeaders redacts sensitive headers from a header map.
-// The original map is not modified; a new map is returned.
+// RedactHeaders redacts credential headers (core.IsCredentialHeader) from a
+// header map. Values are replaced with "[REDACTED]" to prevent leaking
+// secrets. The original map is not modified; a new map is returned.
 func RedactHeaders(headers map[string]string) map[string]string {
 	if headers == nil {
 		return nil
@@ -324,7 +306,7 @@ func RedactHeaders(headers map[string]string) map[string]string {
 
 	result := make(map[string]string, len(headers))
 	for key, value := range headers {
-		if _, ok := redactedHeadersSet[strings.ToLower(key)]; ok {
+		if core.IsCredentialHeader(key) {
 			result[key] = "[REDACTED]"
 		} else {
 			result[key] = value

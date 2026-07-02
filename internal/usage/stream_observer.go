@@ -19,6 +19,7 @@ type StreamUsageObserver struct {
 	requestID       string
 	endpoint        string
 	userPath        string
+	labels          []string
 	closed          bool
 }
 
@@ -53,6 +54,14 @@ func (o *StreamUsageObserver) SetProviderName(providerName string) {
 		return
 	}
 	o.providerName = strings.TrimSpace(providerName)
+}
+
+// SetLabels attaches the request labels extracted from tagging headers.
+func (o *StreamUsageObserver) SetLabels(labels []string) {
+	if o == nil {
+		return
+	}
+	o.labels = labels
 }
 
 // usageKeyLiteral gates WantsJSONEvent: extractUsageFromEvent can only produce
@@ -166,6 +175,7 @@ func (o *StreamUsageObserver) extractUsageFromEvent(chunk map[string]any) *Usage
 	if entry != nil {
 		entry.ProviderName = o.providerName
 		entry.UserPath = o.userPath
+		entry.Labels = o.labels
 	}
 	return entry
 }

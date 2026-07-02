@@ -32,6 +32,7 @@ import (
 	"gomodel/internal/responsecache"
 	"gomodel/internal/server"
 	"gomodel/internal/storage"
+	"gomodel/internal/tagging"
 	"gomodel/internal/usage"
 	"gomodel/internal/virtualmodels"
 	"gomodel/internal/workflows"
@@ -49,6 +50,7 @@ type App struct {
 	fileStore        *filestore.Result
 	virtualModels    *virtualmodels.Result
 	failover         *failover.Result
+	tagging          *tagging.Result
 	pricingOverrides *pricingoverrides.Result
 	authKeys         *authkeys.Result
 	guardrails       *guardrails.Result
@@ -263,6 +265,19 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	closers = append(closers, app.failover.Close)
 	claimSharedStorage(failoverResult.Storage)
 
+	var taggingResult *tagging.Result
+	if sharedStorage != nil {
+		taggingResult, err = tagging.NewWithSharedStorage(ctx, appCfg, sharedStorage)
+	} else {
+		taggingResult, err = tagging.New(ctx, appCfg)
+	}
+	if err != nil {
+		return fail("failed to initialize tagging", err)
+	}
+	app.tagging = taggingResult
+	closers = append(closers, app.tagging.Close)
+	claimSharedStorage(taggingResult.Storage)
+
 	var pricingOverrideResult *pricingoverrides.Result
 	if sharedStorage != nil {
 		pricingOverrideResult, err = pricingoverrides.NewWithSharedStorage(ctx, appCfg, sharedStorage, providerResult.Registry, providerResult.Registry)
@@ -412,6 +427,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		AllowPassthroughV1Alias:         &allowPassthroughV1Alias,
 		UserPathHeader:                  appCfg.Server.UserPathHeader,
 		SwaggerEnabled:                  swaggerEnabled,
+		Tagging:                         taggingResult.Service,
 	}
 
 	// Wire the readiness storage probe. Storage is a required dependency, so a
@@ -442,6 +458,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 			workflowResult.Service,
 			app.guardrails.Service,
 			budgetResult.Service,
+			taggingResult.Service,
 			app,
 			dashboardRuntimeConfig(appCfg, usageEnabledForDashboard),
 			app.live,
@@ -713,7 +730,15 @@ func (a *App) Shutdown(ctx context.Context) error {
 		}
 	}
 
-	// 6. Close workflows subsystem.
+	// 6. Close tagging subsystem.
+	if a.tagging != nil {
+		if err := a.tagging.Close(); err != nil {
+			slog.Error("tagging close error", "error", err)
+			errs = append(errs, fmt.Errorf("tagging close: %w", err))
+		}
+	}
+
+	// 7. Close workflows subsystem.
 	if a.workflows != nil {
 		if err := a.workflows.Close(); err != nil {
 			slog.Error("workflows close error", "error", err)
@@ -721,7 +746,7 @@ func (a *App) Shutdown(ctx context.Context) error {
 		}
 	}
 
-	// 6. Close model pricing overrides subsystem.
+	// 8. Close model pricing overrides subsystem.
 	if a.pricingOverrides != nil {
 		if err := a.pricingOverrides.Close(); err != nil {
 			slog.Error("model pricing overrides close error", "error", err)
@@ -729,7 +754,7 @@ func (a *App) Shutdown(ctx context.Context) error {
 		}
 	}
 
-	// 8. Close reusable guardrails subsystem.
+	// 9. Close reusable guardrails subsystem.
 	if a.guardrails != nil {
 		if err := a.guardrails.Close(); err != nil {
 			slog.Error("guardrails close error", "error", err)
@@ -737,7 +762,7 @@ func (a *App) Shutdown(ctx context.Context) error {
 		}
 	}
 
-	// 9. Close managed auth keys subsystem.
+	// 10. Close managed auth keys subsystem.
 	if a.authKeys != nil {
 		if err := a.authKeys.Close(); err != nil {
 			slog.Error("auth keys close error", "error", err)
@@ -745,7 +770,7 @@ func (a *App) Shutdown(ctx context.Context) error {
 		}
 	}
 
-	// 10. Close file mapping store.
+	// 11. Close file mapping store.
 	if a.fileStore != nil {
 		if err := a.fileStore.Close(); err != nil {
 			slog.Error("file mapping store close error", "error", err)
@@ -753,7 +778,7 @@ func (a *App) Shutdown(ctx context.Context) error {
 		}
 	}
 
-	// 11. Close batch store (flushes pending entries)
+	// 12. Close batch store (flushes pending entries)
 	if a.batch != nil {
 		if err := a.batch.Close(); err != nil {
 			slog.Error("batch store close error", "error", err)
@@ -761,7 +786,7 @@ func (a *App) Shutdown(ctx context.Context) error {
 		}
 	}
 
-	// 12. Close budget subsystem.
+	// 13. Close budget subsystem.
 	if a.budgets != nil {
 		if err := a.budgets.Close(); err != nil {
 			slog.Error("budgets close error", "error", err)
@@ -769,7 +794,7 @@ func (a *App) Shutdown(ctx context.Context) error {
 		}
 	}
 
-	// 13. Close usage tracking (flushes pending entries)
+	// 14. Close usage tracking (flushes pending entries)
 	if a.usage != nil {
 		if err := a.usage.Close(); err != nil {
 			slog.Error("usage logger close error", "error", err)
@@ -777,7 +802,7 @@ func (a *App) Shutdown(ctx context.Context) error {
 		}
 	}
 
-	// 14. Close audit logging (flushes pending logs)
+	// 15. Close audit logging (flushes pending logs)
 	if a.audit != nil {
 		if err := a.audit.Close(); err != nil {
 			slog.Error("audit logger close error", "error", err)
@@ -860,6 +885,7 @@ func initAdmin(
 	workflowService *workflows.Service,
 	guardrailService *guardrails.Service,
 	budgetService *budget.Service,
+	taggingService *tagging.Service,
 	runtimeRefresher admin.RuntimeRefresher,
 	runtimeConfig admin.DashboardConfigResponse,
 	liveBroker *live.Broker,
@@ -919,6 +945,7 @@ func initAdmin(
 		admin.WithWorkflows(workflowService),
 		admin.WithGuardrailService(guardrailService),
 		admin.WithBudgets(budgetService),
+		admin.WithTagging(taggingService),
 		admin.WithRuntimeRefresher(runtimeRefresher),
 		admin.WithDashboardRuntimeConfig(runtimeConfig),
 		admin.WithLiveBroker(liveBroker),

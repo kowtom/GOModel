@@ -296,6 +296,8 @@ func BenchmarkSharedStreamingObserversDefaultConfig(b *testing.B) {
 func benchmarkSharedStreamingObservers(b *testing.B, auditCfg auditlog.Config) {
 	auditLogger := benchAuditLogger{cfg: auditCfg}
 	usageLogger := benchUsageLogger{cfg: usage.Config{Enabled: true}}
+	// Labels mirror a tagged request so the guard exercises the labelled path.
+	labels := []string{"team-alpha", "prod"}
 
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -307,20 +309,23 @@ func benchmarkSharedStreamingObservers(b *testing.B, auditCfg auditlog.Config) {
 			RequestID: "req-bench",
 			Method:    http.MethodPost,
 			Path:      "/v1/chat/completions",
-			Data:      &auditlog.LogData{},
+			Data:      &auditlog.LogData{Labels: labels},
 		}
+
+		usageObserver := usage.NewStreamUsageObserver(
+			usageLogger,
+			"gpt-4o-mini",
+			"mock",
+			"req-bench",
+			"/v1/chat/completions",
+			nil,
+		)
+		usageObserver.SetLabels(labels)
 
 		stream := streaming.NewObservedSSEStream(
 			io.NopCloser(strings.NewReader(sampleChatStream)),
 			auditlog.NewStreamLogObserver(auditLogger, entry, "/v1/chat/completions"),
-			usage.NewStreamUsageObserver(
-				usageLogger,
-				"gpt-4o-mini",
-				"mock",
-				"req-bench",
-				"/v1/chat/completions",
-				nil,
-			),
+			usageObserver,
 		)
 
 		if _, err := io.Copy(io.Discard, stream); err != nil {
@@ -384,8 +389,8 @@ func TestHotPathPerfGuard(t *testing.T) {
 		{
 			name:      "gateway_chat_completion_hot_path",
 			bench:     BenchmarkGatewayHotPathChatCompletion,
-			maxAllocs: 111,   // baseline 110
-			maxBytes:  14784, // baseline ~13.8 KB (incl. per-attempt response body/header capture fields)
+			maxAllocs: 110,   // baseline 108
+			maxBytes:  14080, // baseline ~13.5 KB (incl. per-attempt response body/header capture fields)
 		},
 		{
 			// Production-shaped path: request resolves through a real Router +
@@ -395,22 +400,22 @@ func TestHotPathPerfGuard(t *testing.T) {
 			// full catalog several times per request) would blow these limits.
 			name:      "gateway_chat_completion_hot_path_routed",
 			bench:     BenchmarkGatewayHotPathChatCompletionRouted,
-			maxAllocs: 136,   // baseline 129
-			maxBytes:  15104, // baseline ~13.9 KB
+			maxAllocs: 128,   // baseline 126
+			maxBytes:  14656, // baseline ~14.0 KB
 		},
 		{
 			// Typed chunk decoding + reused read buffer keep this converter at a
 			// fraction of its former map[string]any-per-chunk cost (was 202/19.6KB).
 			name:      "openai_responses_stream_converter",
 			bench:     BenchmarkOpenAIResponsesStreamConverter,
-			maxAllocs: 91,        // baseline 85
-			maxBytes:  12 * 1024, // baseline ~9.7 KB (leaves headroom for pool cold-starts)
+			maxAllocs: 87,    // baseline 85
+			maxBytes:  10752, // baseline ~9.7 KB (leaves headroom for pool cold-starts)
 		},
 		{
 			name:      "shared_stream_audit_and_usage_observers",
 			bench:     BenchmarkSharedStreamingAuditAndUsageObservers,
-			maxAllocs: 160,      // baseline 152
-			maxBytes:  9 * 1024, // baseline ~8.2 KB
+			maxAllocs: 157,  // baseline 155 (incl. request labels on both observers)
+			maxBytes:  8960, // baseline ~8.5 KB
 		},
 		{
 			// Default configuration: audit body capture off, so the observed
@@ -418,8 +423,8 @@ func TestHotPathPerfGuard(t *testing.T) {
 			// A regression that decodes every chunk again would blow this limit.
 			name:      "shared_stream_observers_default_config",
 			bench:     BenchmarkSharedStreamingObserversDefaultConfig,
-			maxAllocs: 61,       // baseline 57
-			maxBytes:  4 * 1024, // baseline ~3.0 KB
+			maxAllocs: 62,   // baseline 60 (incl. request labels on both observers)
+			maxBytes:  3584, // baseline ~3.3 KB
 		},
 	}
 
