@@ -7,7 +7,7 @@ Expand the name of the chart.
 
 {{/*
 Create a default fully qualified app name.
-We truncate at 63 chars because some Kubernetes name fields are limited to this (by the DNS naming spec).
+Truncated to 63 chars because some Kubernetes name fields are limited to this.
 */}}
 {{- define "gomodel.fullname" -}}
 {{- if .Values.fullnameOverride }}
@@ -39,6 +39,7 @@ helm.sh/chart: {{ include "gomodel.chart" . }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
+app.kubernetes.io/part-of: gomodel
 {{- end }}
 
 {{/*
@@ -50,133 +51,89 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
-Create the name of the secret containing provider API keys
-*/}}
-{{- define "gomodel.providerSecretName" -}}
-{{- if .Values.providers.existingSecret }}
-{{- .Values.providers.existingSecret }}
-{{- else }}
-{{- include "gomodel.fullname" . }}-providers
-{{- end }}
-{{- end }}
-
-{{/*
-Create the name of the secret containing auth credentials
-*/}}
-{{- define "gomodel.authSecretName" -}}
-{{- if .Values.auth.existingSecret }}
-{{- .Values.auth.existingSecret }}
-{{- else }}
-{{- include "gomodel.fullname" . }}-auth
-{{- end }}
-{{- end }}
-
-{{/*
-Determine the Redis URL - either from values or auto-generated for subchart
-*/}}
-{{- define "gomodel.redisUrl" -}}
-{{- if .Values.cache.redis.url }}
-{{- .Values.cache.redis.url }}
-{{- else if .Values.redis.enabled }}
-{{- printf "redis://%s-redis-master:6379" .Release.Name }}
-{{- else }}
-{{- "" }}
-{{- end }}
-{{- end }}
-
-{{/*
-Create the image reference
+The image reference, defaulting the tag to the chart appVersion.
 */}}
 {{- define "gomodel.image" -}}
-{{- $tag := .Values.image.tag | default .Chart.AppVersion }}
-{{- printf "%s:%s" .Values.image.repository $tag }}
+{{- $tag := .Values.image.tag | default .Chart.AppVersion -}}
+{{- printf "%s:%s" .Values.image.repository $tag -}}
 {{- end }}
 
 {{/*
-Normalize the public base path used by the application.
+Create the name of the service account to use.
+*/}}
+{{- define "gomodel.serviceAccountName" -}}
+{{- if .Values.serviceAccount.create }}
+{{- default (include "gomodel.fullname" .) .Values.serviceAccount.name }}
+{{- else }}
+{{- default "default" .Values.serviceAccount.name }}
+{{- end }}
+{{- end }}
+
+{{/*
+Name of the Secret to reference via envFrom. Prefers an existing secret.
+*/}}
+{{- define "gomodel.secretName" -}}
+{{- if .Values.secrets.existingSecret }}
+{{- .Values.secrets.existingSecret }}
+{{- else }}
+{{- include "gomodel.fullname" . }}
+{{- end }}
+{{- end }}
+
+{{/*
+Whether the chart manages its own Secret (i.e. no existing secret and some data set).
+*/}}
+{{- define "gomodel.createSecret" -}}
+{{- if and (not .Values.secrets.existingSecret) (or .Values.secrets.masterKey .Values.secrets.data) -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
+Whether persistent (SQLite/StatefulSet) mode is active.
+*/}}
+{{- define "gomodel.persistent" -}}
+{{- if .Values.persistence.enabled -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
+Effective replica count. Forced to 1 in persistent (SQLite) mode.
+*/}}
+{{- define "gomodel.replicaCount" -}}
+{{- if .Values.persistence.enabled -}}
+1
+{{- else -}}
+{{- .Values.replicaCount -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+The URL path prefix (BASE_PATH) used to build probe paths. Honors an env override,
+then config.server.base_path, defaulting to "/".
 */}}
 {{- define "gomodel.basePath" -}}
-{{- $basePath := trim (default "/" .Values.server.basePath) -}}
-{{- if or (eq $basePath "") (eq $basePath "/") -}}
-/
-{{- else -}}
-{{- if not (hasPrefix "/" $basePath) -}}
-{{- $basePath = printf "/%s" $basePath -}}
+{{- $bp := "/" -}}
+{{- if and .Values.config .Values.config.server .Values.config.server.base_path -}}
+{{- $bp = .Values.config.server.base_path -}}
 {{- end -}}
-{{- $basePath = clean $basePath -}}
-{{- if or (eq $basePath ".") (eq $basePath "/") -}}
-/
-{{- else -}}
-{{- $basePath -}}
+{{- if and .Values.env .Values.env.BASE_PATH -}}
+{{- $bp = .Values.env.BASE_PATH -}}
 {{- end -}}
-{{- end -}}
+{{- $bp = printf "/%s" (trimPrefix "/" (trimSuffix "/" $bp)) -}}
+{{- if eq $bp "/" -}}{{- $bp = "" -}}{{- end -}}
+{{- $bp -}}
 {{- end }}
 
 {{/*
-Prefix an application path with server.basePath unless it is already prefixed.
+Validation guardrails.
 */}}
-{{- define "gomodel.pathWithBasePath" -}}
-{{- $root := .root -}}
-{{- $path := trim (default "/" .path) -}}
-{{- if or (eq $path "") (eq $path "/") -}}
-{{- $path = "/" -}}
-{{- else if not (hasPrefix "/" $path) -}}
-{{- $path = printf "/%s" $path -}}
+{{- define "gomodel.validate" -}}
+{{- if and .Values.persistence.enabled (gt (int .Values.replicaCount) 1) -}}
+{{- fail "persistence.enabled=true uses SQLite storage which cannot be shared across pods. Set replicaCount to 1, or disable persistence and use an external database." -}}
 {{- end -}}
-{{- $basePath := include "gomodel.basePath" $root -}}
-{{- if eq $path "/" -}}
-{{- if eq $basePath "/" -}}
-{{- $path -}}
-{{- else -}}
-{{- $basePath -}}
+{{- if and .Values.persistence.enabled .Values.autoscaling.enabled -}}
+{{- fail "autoscaling is incompatible with persistence.enabled=true (SQLite single-writer). Disable one of them." -}}
 {{- end -}}
-{{- else if eq $basePath "/" -}}
-{{- $path -}}
-{{- else if or (eq $path $basePath) (hasPrefix (printf "%s/" $basePath) $path) -}}
-{{- $path -}}
-{{- else -}}
-{{- printf "%s%s" $basePath $path -}}
-{{- end -}}
-{{- end }}
-
-{{/*
-Generate provider API key entries for the Secret stringData.
-*/}}
-{{- define "gomodel.providerSecretData" -}}
-{{- range $name, $config := .Values.providers }}
-  {{- if and (kindIs "map" $config) (hasKey $config "apiKey") $config.apiKey }}
-{{ upper $name }}_API_KEY: {{ $config.apiKey | quote }}
-  {{- end }}
-{{- end }}
-{{- end }}
-
-{{/*
-Generate provider environment variables for the Deployment.
-*/}}
-{{- define "gomodel.providerEnvVars" -}}
-{{- $secretName := include "gomodel.providerSecretName" . -}}
-{{- range $name, $config := .Values.providers }}
-{{- if kindIs "map" $config }}
-{{- $hasAPIKey := and (hasKey $config "apiKey") $config.apiKey }}
-{{- $enabledWithExistingSecret := and $.Values.providers.existingSecret (hasKey $config "enabled") $config.enabled }}
-{{- $enabledWithBaseURL := and (hasKey $config "enabled") $config.enabled $config.baseUrl }}
-{{- if or $hasAPIKey $enabledWithExistingSecret }}
-- name: {{ upper $name }}_API_KEY
-  valueFrom:
-    secretKeyRef:
-      name: {{ $secretName }}
-      key: {{ upper $name }}_API_KEY
-{{- end }}
-{{- if or (or $hasAPIKey $enabledWithExistingSecret) $enabledWithBaseURL }}
-{{- if $config.baseUrl }}
-- name: {{ upper $name }}_BASE_URL
-  value: {{ $config.baseUrl | quote }}
-{{- end }}
-{{- end }}
-{{- if and (eq $name "gemini") (hasKey $config "useNativeApi") }}
-- name: USE_GOOGLE_GEMINI_NATIVE_API
-  value: {{ $config.useNativeApi | quote }}
-{{- end }}
-{{- end }}
-{{- end }}
 {{- end }}

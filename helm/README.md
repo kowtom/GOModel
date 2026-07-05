@@ -1,178 +1,109 @@
 # GoModel Helm Chart
 
-High-performance AI gateway for multiple LLM providers (OpenAI, Anthropic, Gemini, DeepSeek, Groq, Z.ai, xAI, Oracle).
+A Helm chart for [GoModel](https://github.com/ENTERPILOT/GoModel) — a high-performance,
+lightweight AI gateway that routes requests to multiple AI model providers through an
+OpenAI-compatible API.
 
-## Prerequisites
-
-- Kubernetes 1.29+ (for Gateway API v1 support)
-- Helm 3.x
-- (Optional) Prometheus Operator for ServiceMonitor support
-
-## Installation
-
-### Add the Helm repository (if published)
+## TL;DR
 
 ```bash
-helm repo add gomodel https://your-org.github.io/gomodel
-helm repo update
+helm install gomodel oci://registry-1.docker.io/enterpilot/gomodel \
+  --version 0.1.0 \
+  --namespace gomodel --create-namespace \
+  --set secrets.masterKey=$(openssl rand -hex 32) \
+  --set secrets.data.OPENAI_API_KEY=sk-...
 ```
 
-### Install from local chart
+> Replace `enterpilot` with the Docker Hub namespace the chart was published under
+> (`DOCKER_USERNAME`). The chart is pushed by the `helm-release.yml` workflow when a
+> `helm-v*` tag is created.
+>
+> You can also install directly from a local checkout:
+> `helm install gomodel ./helm -n gomodel --create-namespace`.
 
-```bash
-# Basic install with OpenAI (provider auto-enables when apiKey is set)
-helm install gomodel ./helm \
-  -n gomodel --create-namespace \
-  --set providers.openai.apiKey="sk-..."
+## Introduction
 
-# Multi-provider setup with Redis cache
-helm install gomodel ./helm \
-  -n gomodel --create-namespace \
-  --set providers.openai.apiKey="sk-..." \
-  --set providers.anthropic.apiKey="sk-ant-..." \
-  --set redis.enabled=true
+The chart deploys GoModel using the official distroless image
+(`enterpilot/gomodel`, non-root UID/GID `65532`) with Kubernetes best practices:
+read-only root filesystem, dropped capabilities, HTTP health/readiness probes,
+optional autoscaling, PodDisruptionBudget, NetworkPolicy and Prometheus integration.
 
-# Using existing secrets (GitOps-friendly)
-helm install gomodel ./helm \
-  -n gomodel --create-namespace \
-  --set providers.existingSecret="llm-api-keys" \
-  --set providers.openai.enabled=true \
-  --set providers.anthropic.enabled=true
-```
+## Deployment modes
+
+GoModel loads configuration in three layers: **built-in defaults → `config.yaml`
+(optional) → environment variables (always win)**.
+
+| Mode | When | Workload | Scaling |
+| --- | --- | --- | --- |
+| **Stateless** (default) | External Postgres/MongoDB + Redis | `Deployment` | Multi-replica, HPA |
+| **SQLite** | `persistence.enabled=true` | `StatefulSet` + PVC at `/app/data` | Single replica only |
+
+The default (no external DB configured) runs a single replica writing SQLite to an
+**ephemeral** `emptyDir` — suitable for evaluation only. For production, either enable
+`persistence` (durable single node) or point the app at external datastores (scalable).
 
 ## Configuration
 
-### Key Values
+Two complementary mechanisms:
 
-| Parameter                        | Description                                                                                    | Default                |
-| -------------------------------- | ---------------------------------------------------------------------------------------------- | ---------------------- |
-| `replicaCount`                   | Number of replicas                                                                             | `2`                    |
-| `image.repository`               | Image repository                                                                               | `enterpilot/gomodel`   |
-| `image.tag`                      | Image tag                                                                                      | `""` (uses appVersion) |
-| `server.port`                    | Server port                                                                                    | `8080`                 |
-| `server.basePath`                | URL path prefix where GoModel is mounted                                                       | `"/"`                  |
-| `server.userPathHeader`          | Header used to read/write request user_path values                                             | `"X-GoModel-User-Path"` |
-| `server.bodySizeLimit`           | Max request body size                                                                          | `"10M"`                |
-| `auth.masterKey`                 | Master key for auth                                                                            | `""`                   |
-| `auth.existingSecret`            | Existing secret for auth                                                                       | `""`                   |
-| `providers.existingSecret`       | Existing secret for API keys                                                                   | `""`                   |
-| `providers.openai.enabled`       | Enable OpenAI                                                                                  | `false`                |
-| `providers.anthropic.enabled`    | Enable Anthropic                                                                               | `false`                |
-| `providers.gemini.enabled`       | Enable Gemini                                                                                  | `false`                |
-| `providers.gemini.useNativeApi`  | Use Gemini native generateContent for chat/responses; set false for Gemini OpenAI compatibility | `true`                 |
-| `providers.groq.enabled`         | Enable Groq                                                                                    | `false`                |
-| `providers.xai.enabled`          | Enable xAI                                                                                     | `false`                |
-| `providers.zai.enabled`          | Enable Z.ai                                                                                    | `false`                |
-| `providers.zai.baseUrl`          | Optional Z.ai base URL mapped to `ZAI_BASE_URL`; use Coding Plan endpoint when needed          | `""`                   |
-| `providers.oracle.enabled`       | Enable Oracle                                                                                  | `false`                |
-| `providers.oracle.baseUrl`       | Oracle OpenAI-compatible base URL mapped to `ORACLE_BASE_URL`; required when Oracle is enabled | `""`                   |
-| `providers.vllm.enabled`         | Enable vLLM                                                                                    | `false`                |
-| `providers.vllm.baseUrl`         | vLLM OpenAI-compatible base URL mapped to `VLLM_BASE_URL`; required when vLLM is enabled       | `""`                   |
-| `cache.type`                     | Cache type (local/redis)                                                                       | `"redis"`              |
-| `redis.enabled`                  | Deploy Redis subchart                                                                          | `true`                 |
-| `metrics.enabled`                | Enable Prometheus metrics                                                                      | `true`                 |
-| `metrics.serviceMonitor.enabled` | Create ServiceMonitor                                                                          | `false`                |
-| `logging.format`                 | Log format; empty auto-detects, or set `json`/`text`                                           | `""`                   |
-| `ingress.enabled`                | Enable Ingress                                                                                 | `false`                |
-| `gateway.enabled`                | Enable Gateway API HTTPRoute                                                                   | `false`                |
-| `autoscaling.enabled`            | Enable HPA                                                                                     | `false`                |
+- `config` — rendered verbatim into a ConfigMap and mounted read-only at
+  `/app/config/config.yaml`. Supports `${ENV_VAR}` expansion, so reference secret
+  values by name here and provide them through `secrets`.
+- `env` / `extraEnv` — environment variables, which always override `config.yaml`.
 
-### Using Existing Secrets
+### Secrets
 
-Create a secret with your API keys:
+Sensitive values (`GOMODEL_MASTER_KEY`, `<PROVIDER>_API_KEY`, `POSTGRES_URL`,
+`MONGODB_URL`, `REDIS_URL`, ...) go under `secrets`:
 
 ```yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: llm-api-keys
-type: Opaque
-stringData:
-  OPENAI_API_KEY: "sk-..."
-  ANTHROPIC_API_KEY: "sk-ant-..."
-  GEMINI_API_KEY: "..."
-  ZAI_API_KEY: "..."
-  ORACLE_API_KEY: "..."
-  VLLM_API_KEY: "..."
+secrets:
+  masterKey: "change-me"          # GOMODEL_MASTER_KEY; without it the gateway is UNSAFE
+  data:
+    OPENAI_API_KEY: sk-...
+    POSTGRES_URL: postgres://user:pass@host:5432/gomodel
+    REDIS_URL: redis://redis:6379
 ```
 
-Oracle also requires a base URL in values. The chart maps `providers.oracle.baseUrl`
-to the container env var `ORACLE_BASE_URL`.
+They are rendered into a chart-managed `Secret` and injected via `envFrom`. For
+production / external secret managers, set `secrets.existingSecret` to reference a
+pre-created Secret instead.
 
-vLLM does not require an API key unless the upstream server was started with
-`--api-key`. The chart maps `providers.vllm.baseUrl` to the container env var
-`VLLM_BASE_URL`.
+## Health & metrics
 
-Then reference it (use `enabled=true` when using existingSecret since apiKey isn't set directly):
+- **Liveness**: `GET {basePath}/health`
+- **Readiness**: `GET {basePath}/health/ready` (returns `503` when primary storage is
+  down, pulling the pod out of the Service; a degraded cache stays in rotation)
+- **Metrics**: `GET {basePath}/metrics` — enable with `metrics.enabled=true` (or
+  `metrics.serviceMonitor.enabled=true`, which also creates a Prometheus Operator
+  ServiceMonitor)
 
-```bash
-helm install gomodel ./helm \
-  --set providers.existingSecret="llm-api-keys" \
-  --set providers.openai.enabled=true
-```
+Probe paths automatically honor `BASE_PATH` / `config.server.base_path`.
 
-Example Oracle setup with an existing secret:
+## Values
 
-```bash
-helm install gomodel ./helm \
-  --set providers.existingSecret="llm-api-keys" \
-  --set providers.oracle.enabled=true \
-  --set providers.oracle.baseUrl="https://inference.generativeai.us-chicago-1.oci.oraclecloud.com/20231130/actions/v1"
-```
+See [`values.yaml`](./values.yaml) for the full, documented list. Key values:
 
-Example keyless vLLM setup:
+| Key | Default | Description |
+| --- | --- | --- |
+| `image.repository` | `enterpilot/gomodel` | Image repository |
+| `image.tag` | `""` (chart `appVersion`) | Image tag |
+| `replicaCount` | `1` | Replicas (forced to 1 in SQLite mode) |
+| `persistence.enabled` | `false` | Use SQLite StatefulSet + PVC |
+| `secrets.masterKey` | `""` | Gateway master key |
+| `secrets.existingSecret` | `""` | Reference an existing Secret instead |
+| `config` | `{}` | Rendered into `config.yaml` |
+| `ingress.enabled` | `false` | Create an Ingress |
+| `autoscaling.enabled` | `false` | Create an HPA (stateless only) |
+| `podDisruptionBudget.enabled` | `false` | Create a PDB |
+| `networkPolicy.enabled` | `false` | Restrict ingress/egress |
+| `metrics.enabled` | `false` | Enable Prometheus `/metrics` |
+| `metrics.serviceMonitor.enabled` | `false` | Create a ServiceMonitor |
 
-```bash
-helm install gomodel ./helm \
-  --set providers.vllm.enabled=true \
-  --set providers.vllm.baseUrl="http://vllm.default.svc.cluster.local:8000/v1"
-```
+## Example value sets
 
-### Ingress Example
+Ready-to-use examples live in [`ci/`](./ci):
 
-```yaml
-ingress:
-  enabled: true
-  className: nginx
-  annotations:
-    cert-manager.io/cluster-issuer: letsencrypt-prod
-  hosts:
-    - host: gomodel.example.com
-      paths:
-        - path: /
-          pathType: Prefix
-  tls:
-    - secretName: gomodel-tls
-      hosts:
-        - gomodel.example.com
-```
-
-### Gateway API Example
-
-```yaml
-gateway:
-  enabled: true
-  parentRef:
-    name: my-gateway
-    namespace: gateway-system
-  hostnames:
-    - gomodel.example.com
-```
-
-## Upgrading
-
-```bash
-helm upgrade gomodel ./helm -n gomodel -f values.yaml
-```
-
-## Uninstalling
-
-```bash
-helm uninstall gomodel -n gomodel
-```
-
-# Todo
-
-- Add a values-demo.yaml file with a demo setup ready to run
-- Consider adding prometheus + grafana stack as an optional subchart
-- Add an example for production-ready redis configuration with persistence and authentication enabled
+- `stateless-values.yaml` — multi-replica with external Postgres + Redis
+- `sqlite-persistent-values.yaml` — single node with a persistent SQLite volume
+- `ingress-tls-values.yaml` — Ingress + TLS + NetworkPolicy + ServiceMonitor

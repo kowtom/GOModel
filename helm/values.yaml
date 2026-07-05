@@ -1,290 +1,250 @@
-# Default values for gomodel
-# This is a YAML-formatted file.
+# Default values for the GoModel Helm chart.
+# This is a YAML-formatted file. Values are documented for helm-docs.
 
-# -- Number of replicas (ignored if autoscaling.enabled is true)
-replicaCount: 2
+# -- Number of GoModel replicas. Must be 1 when `persistence.enabled` is true
+# (SQLite storage cannot be shared across pods).
+replicaCount: 1
 
 image:
-  # -- Image repository
+  # -- Container image repository. Official image is published to Docker Hub.
   repository: enterpilot/gomodel
-  # -- Image pull policy
+  # -- Image pull policy.
   pullPolicy: IfNotPresent
-  # -- Overrides the image tag (default is the chart appVersion)
+  # -- Image tag. Defaults to the chart's appVersion when empty.
   tag: ""
 
-# -- Image pull secrets
+# -- Image pull secrets for private registries.
 imagePullSecrets: []
-# -- Override the name of the chart
+# -- Override the chart name.
 nameOverride: ""
-# -- Override the full name of the chart
+# -- Override the fully qualified app name.
 fullnameOverride: ""
 
-# Server configuration
-server:
-  # -- Server port
-  port: 8080
-  # -- URL path prefix where GoModel is mounted (for example, "/g")
-  basePath: "/"
-  # -- Header used to read/write request user_path values
-  userPathHeader: "X-GoModel-User-Path"
-  # -- Maximum request body size (e.g., "10M", "1G", "500K")
-  bodySizeLimit: "10M"
+serviceAccount:
+  # -- Create a dedicated ServiceAccount.
+  create: true
+  # -- Automount the ServiceAccount token. Disabled by default (least privilege).
+  automount: false
+  # -- Annotations to add to the ServiceAccount.
+  annotations: {}
+  # -- ServiceAccount name. Generated when empty and create is true.
+  name: ""
 
-# Authentication configuration
-auth:
-  # -- Master key for API authentication (leave empty to disable auth - NOT recommended for production)
-  masterKey: ""
-  # -- Use an existing secret for the master key
-  existingSecret: ""
-  # -- Key in the existing secret containing the master key
-  existingSecretKey: "master-key"
+# -- Additional annotations for the pod.
+podAnnotations: {}
+# -- Additional labels for the pod.
+podLabels: {}
 
-# LLM Provider configuration
-providers:
-  # -- Use an existing secret for all provider API keys
-  # Secret should contain keys: OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, GROQ_API_KEY, XAI_API_KEY, ZAI_API_KEY, ORACLE_API_KEY, VLLM_API_KEY
-  existingSecret: ""
+# Pod-level security context. Matches the distroless nonroot image (UID/GID 65532).
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
 
-  openai:
-    # -- Enable OpenAI provider (auto-enabled if apiKey is set)
-    enabled: false
-    # -- OpenAI API key (ignored if providers.existingSecret is set)
-    apiKey: ""
-    # -- Optional: Override OpenAI base URL
-    baseUrl: ""
+# Container-level security context. The image supports a read-only root filesystem;
+# writable paths (/app/.cache, /app/data) are provided via mounted volumes.
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
 
-  anthropic:
-    # -- Enable Anthropic provider (auto-enabled if apiKey is set)
-    enabled: false
-    # -- Anthropic API key (ignored if providers.existingSecret is set)
-    apiKey: ""
-    # -- Optional: Override Anthropic base URL
-    baseUrl: ""
-
-  gemini:
-    # -- Enable Google Gemini provider (auto-enabled if apiKey is set)
-    enabled: false
-    # -- Gemini API key (ignored if providers.existingSecret is set)
-    apiKey: ""
-    # -- Use Gemini native generateContent API for chat/responses. Set false to use Gemini's OpenAI-compatible API.
-    useNativeApi: true
-    # -- Optional: Override Gemini base URL
-    baseUrl: ""
-
-  groq:
-    # -- Enable Groq provider (auto-enabled if apiKey is set)
-    enabled: false
-    # -- Groq API key (ignored if providers.existingSecret is set)
-    apiKey: ""
-    # -- Optional: Override Groq base URL
-    baseUrl: ""
-
-  xai:
-    # -- Enable xAI (Grok) provider (auto-enabled if apiKey is set)
-    enabled: false
-    # -- xAI API key (ignored if providers.existingSecret is set)
-    apiKey: ""
-    # -- Optional: Override xAI base URL
-    baseUrl: ""
-
-  zai:
-    # -- Enable Z.ai provider (auto-enabled if apiKey is set)
-    enabled: false
-    # -- Z.ai API key (ignored if providers.existingSecret is set)
-    apiKey: ""
-    # -- Optional: Override Z.ai base URL; use https://api.z.ai/api/coding/paas/v4 for GLM Coding Plan
-    baseUrl: ""
-
-  oracle:
-    # -- Enable Oracle provider (auto-enabled if apiKey is set)
-    enabled: false
-    # -- Oracle API key (ignored if providers.existingSecret is set)
-    apiKey: ""
-    # -- Required: Oracle OpenAI-compatible base URL
-    baseUrl: ""
-
-  vllm:
-    # -- Enable vLLM provider (API key optional; baseUrl required when enabled)
-    enabled: false
-    # -- Optional vLLM API key, matching vllm serve --api-key when configured
-    apiKey: ""
-    # -- vLLM OpenAI-compatible base URL
-    baseUrl: ""
-
-# Cache configuration
-cache:
-  redis:
-    # -- Redis connection URL (e.g., "redis://redis:6379")
-    # If redis.enabled is true, this is auto-configured to use the subchart.
-    # Set this explicitly to use an external Redis instance instead.
-    url: ""
-    # -- Redis key prefix for storing the model cache
-    keyModels: "gomodel:models"
-    # -- TTL for model cache data in seconds (default: 24 hours)
-    ttlModels: 86400
-    # -- Redis key prefix for storing the response cache
-    keyResponses: "gomodel:response:"
-    # -- TTL for response cache data in seconds (default: 1 hour)
-    ttlResponses: 3600
-
-# Redis subchart configuration (Bitnami Redis)
-redis:
-  # -- Deploy Redis subchart
-  enabled: true
-  # -- Redis architecture: standalone or replication
-  architecture: standalone
-  auth:
-    # -- Disable Redis authentication for simplicity
-    enabled: false
-  master:
-    persistence:
-      # -- Disable persistence for standalone mode
-      enabled: false
-
-# Prometheus metrics configuration
-metrics:
-  # -- Enable Prometheus metrics
-  enabled: true
-  # -- Metrics endpoint path
-  endpoint: "/metrics"
-
-  serviceMonitor:
-    # -- Create a ServiceMonitor for Prometheus Operator
-    enabled: false
-    # ServiceMonitor path is automatically prefixed with server.basePath.
-    # -- Scrape interval
-    interval: "15s"
-    # -- Additional labels for the ServiceMonitor
-    labels: {}
-
-# Logging configuration
-logging:
-  # -- Log format; leave empty to auto-detect, or set to "json" or "text"
-  format: ""
-
-# Kubernetes Service configuration
 service:
-  # -- Service type: ClusterIP, LoadBalancer, NodePort
+  # -- Kubernetes Service type.
   type: ClusterIP
-  # -- Service port
+  # -- Service port.
   port: 8080
-  # -- Service annotations
+  # -- Extra annotations for the Service.
   annotations: {}
 
-# Ingress configuration
 ingress:
-  # -- Enable Ingress
+  # -- Enable an Ingress resource.
   enabled: false
-  # -- Ingress class name
+  # -- IngressClass name.
   className: ""
-  # -- Ingress annotations
+  # -- Ingress annotations.
   annotations: {}
-  # -- Ingress hosts configuration
   hosts:
     - host: gomodel.local
       paths:
         - path: /
           pathType: Prefix
-  # -- Ingress TLS configuration
+  # -- TLS configuration.
   tls: []
   #  - secretName: gomodel-tls
   #    hosts:
   #      - gomodel.local
 
-# Gateway API configuration
-gateway:
-  # -- Enable Gateway API HTTPRoute
-  enabled: false
-  # -- Parent Gateway reference
-  parentRef:
-    # -- Gateway name
-    name: ""
-    # -- Gateway namespace (defaults to release namespace)
-    namespace: ""
-  # -- Hostnames for the HTTPRoute
-  hostnames: []
-  #  - gomodel.example.com
-
-# Resource requests and limits
+# -- Resource requests and limits.
 resources:
   requests:
     cpu: 100m
     memory: 128Mi
   limits:
-    cpu: 1000m
+    cpu: "1"
     memory: 512Mi
 
-# Horizontal Pod Autoscaler configuration
-autoscaling:
-  # -- Enable HPA
-  enabled: false
-  # -- Minimum replicas
-  minReplicas: 2
-  # -- Maximum replicas
-  maxReplicas: 10
-  # -- Target CPU utilization percentage
-  targetCPUUtilizationPercentage: 70
-  # -- Target memory utilization percentage (optional)
-  # targetMemoryUtilizationPercentage: 80
-
-# Pod Disruption Budget configuration
-podDisruptionBudget:
-  # -- Enable PDB
-  enabled: true
-  # -- Minimum available pods
-  minAvailable: 1
-  # -- Maximum unavailable pods (alternative to minAvailable)
-  # maxUnavailable: 1
-
-# Liveness probe configuration
-# httpGet.path is automatically prefixed with server.basePath.
+# Liveness probe hits GET /health -> 200 {"status":"ok"}.
 livenessProbe:
-  httpGet:
-    path: /health
-    port: http
-  initialDelaySeconds: 10
-  periodSeconds: 10
-  timeoutSeconds: 5
-  failureThreshold: 3
-
-# Readiness probe configuration
-# httpGet.path is automatically prefixed with server.basePath.
-readinessProbe:
-  httpGet:
-    path: /health
-    port: http
+  enabled: true
   initialDelaySeconds: 5
-  periodSeconds: 5
+  periodSeconds: 15
   timeoutSeconds: 3
   failureThreshold: 3
+  successThreshold: 1
 
-# Pod security context
-podSecurityContext:
-  runAsNonRoot: true
-  runAsUser: 1000
-  fsGroup: 1000
+# Readiness probe hits GET /health/ready. Returns 503 (not_ready) when primary
+# storage is unreachable, which removes the pod from Service endpoints.
+readinessProbe:
+  enabled: true
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+  successThreshold: 1
 
-# Container security context
-securityContext:
-  allowPrivilegeEscalation: false
-  readOnlyRootFilesystem: true
-  runAsNonRoot: true
-  runAsUser: 1000
-  capabilities:
-    drop:
-      - ALL
+# Startup probe protects slow first boots without loosening the liveness probe.
+startupProbe:
+  enabled: true
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 30
+  successThreshold: 1
 
-# -- Node selector
+autoscaling:
+  # -- Enable a HorizontalPodAutoscaler. Ignored when `persistence.enabled` is true.
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+  # -- Target memory utilization percentage. Set to null to disable.
+  targetMemoryUtilizationPercentage: null
+
+podDisruptionBudget:
+  # -- Enable a PodDisruptionBudget.
+  enabled: false
+  # -- Minimum available pods. Mutually exclusive with maxUnavailable.
+  minAvailable: 1
+  # -- Maximum unavailable pods.
+  maxUnavailable: null
+
+# Persistence enables SQLite storage mode. When true, the workload is deployed as a
+# StatefulSet with a PersistentVolumeClaim mounted at /app/data, and replicaCount is
+# forced to 1 (SQLite cannot be shared). Leave disabled and use external Postgres/
+# MongoDB + Redis for a horizontally scalable, stateless deployment.
+persistence:
+  # -- Enable persistent SQLite storage (StatefulSet mode).
+  enabled: false
+  # -- Existing PVC name to use instead of a volumeClaimTemplate.
+  existingClaim: ""
+  # -- StorageClass for the volume. Empty uses the cluster default.
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  # -- Volume size.
+  size: 1Gi
+  # -- Annotations for the PVC.
+  annotations: {}
+
+metrics:
+  # -- Enable Prometheus metrics (sets METRICS_ENABLED=true and exposes /metrics).
+  enabled: false
+  serviceMonitor:
+    # -- Create a Prometheus Operator ServiceMonitor. Implies metrics.enabled.
+    enabled: false
+    # -- Namespace for the ServiceMonitor. Defaults to the release namespace.
+    namespace: ""
+    # -- Scrape interval.
+    interval: 30s
+    # -- Scrape timeout.
+    scrapeTimeout: 10s
+    # -- Extra labels for the ServiceMonitor (e.g. to match a Prometheus selector).
+    labels: {}
+    # -- Metric relabelings.
+    metricRelabelings: []
+    # -- Relabelings.
+    relabelings: []
+
+networkPolicy:
+  # -- Create a NetworkPolicy restricting ingress/egress.
+  enabled: false
+  # -- Extra ingress rules appended to the default (allow to the HTTP port).
+  extraIngress: []
+  # -- Extra egress rules appended to the defaults (DNS + HTTPS to providers).
+  extraEgress: []
+
+# -- The GoModel config.yaml rendered into a ConfigMap and mounted read-only at
+# /app/config/config.yaml. Supports ${ENV_VAR} expansion, so secret values should be
+# referenced by name here and supplied via `secrets` / `envFrom`. Leave empty to rely
+# purely on environment variables and built-in defaults.
+config: {}
+#  server:
+#    port: "8080"
+#  storage:
+#    type: postgresql
+#    postgresql:
+#      url: ${POSTGRES_URL}
+#  cache:
+#    model:
+#      redis:
+#        url: ${REDIS_URL}
+
+secrets:
+  # -- Use an existing Secret (referenced via envFrom) instead of a chart-managed one.
+  # Recommended for production / external secret managers.
+  existingSecret: ""
+  # -- GoModel master key (GOMODEL_MASTER_KEY). Strongly recommended; without it the
+  # gateway runs in UNSAFE mode.
+  masterKey: ""
+  # -- Provider API keys and connection URLs, rendered into the chart Secret and
+  # injected via envFrom. Keys are used verbatim as env var names.
+  # Example:
+  #   OPENAI_API_KEY: sk-...
+  #   ANTHROPIC_API_KEY: sk-ant-...
+  #   POSTGRES_URL: postgres://user:pass@host:5432/gomodel
+  #   REDIS_URL: redis://redis:6379
+  data: {}
+
+# -- Non-secret environment variables (env vars always win over config.yaml).
+env:
+  # PORT: "8080"
+  # LOG_LEVEL: info
+  # LOG_FORMAT: json
+
+# -- Extra environment variables using full valueFrom syntax.
+extraEnv: []
+#  - name: SOME_KEY
+#    valueFrom:
+#      secretKeyRef:
+#        name: my-secret
+#        key: some-key
+
+# -- Extra volumes.
+extraVolumes: []
+# -- Extra volume mounts.
+extraVolumeMounts: []
+
+# -- Deployment update strategy (stateless mode). Zero-downtime by default.
+updateStrategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 0
+    maxSurge: 1
+
+# -- Node selector.
 nodeSelector: {}
-
-# -- Tolerations
+# -- Tolerations.
 tolerations: []
-
-# -- Affinity rules
+# -- Affinity rules.
 affinity: {}
-
-# -- Additional pod annotations
-podAnnotations: {}
-
-# -- Additional pod labels
-podLabels: {}
+# -- Topology spread constraints.
+topologySpreadConstraints: []
+# -- Grace period for pod termination.
+terminationGracePeriodSeconds: 30
