@@ -25,6 +25,14 @@
                             {{template "dollar-icon"}}
                         </button>
                         <button type="button" class="table-action-btn table-icon-btn"
+                            x-show="rateLimitsEnabled() && group.provider_name"
+                            :class="rateLimitGaugeClassForProvider(group)"
+                            :aria-label="rateLimitGaugeTitle('provider ' + group.display_name, rateLimitGaugeClassForProvider(group))"
+                            :title="rateLimitGaugeTitle('provider ' + group.display_name, rateLimitGaugeClassForProvider(group))"
+                            @click="openRateLimitInspectorForProvider(group)">
+                            {{template "gauge-icon"}}
+                        </button>
+                        <button type="button" class="table-action-btn table-icon-btn"
                             x-show="virtualModelsAvailable && group.access.selector"
                             :class="modelOverrideEditButtonClass(hasAccessOverride(group.access))"
                             :aria-label="modelOverrideEditButtonLabel('provider access for ' + group.display_name, hasAccessOverride(group.access))"
@@ -119,6 +127,14 @@
                                 :disabled="Boolean(rowDeletingKey)"
                                 @click="removeRedirectRow(row)">
                                 {{template "trash-icon"}}
+                            </button>
+                            <button type="button" class="table-action-btn table-icon-btn"
+                                x-show="rateLimitsEnabled() && rateLimitInspectorModelID(row)"
+                                :class="rateLimitGaugeClassForModel(row)"
+                                :aria-label="rateLimitGaugeTitle(row.display_name, rateLimitGaugeClassForModel(row))"
+                                :title="rateLimitGaugeTitle(row.display_name, rateLimitGaugeClassForModel(row))"
+                                @click="openRateLimitInspectorForModel(row)">
+                                {{template "gauge-icon"}}
                             </button>
                             <button type="button" class="table-action-btn table-icon-btn"
                                 x-show="virtualModelsAvailable && !row.masking_alias"

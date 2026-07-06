@@ -14,6 +14,7 @@ type passthroughService struct {
 	logger                       auditlog.LoggerInterface
 	usageLogger                  usage.LoggerInterface
 	budgetChecker                BudgetChecker
+	rateLimiter                  RateLimiter
 	pricingResolver              usage.PricingResolver
 	normalizePassthroughV1Prefix bool
 	enabledPassthroughProviders  map[string]struct{}
@@ -39,9 +40,11 @@ func (s *passthroughService) ProviderPassthrough(c *echo.Context) error {
 			}
 		}
 	}
-	if err := enforceBudget(c, s.budgetChecker); err != nil {
+	adm, err := enforceAdmission(c, s.rateLimiter, s.budgetChecker, rateLimitRoute{provider: info.ProviderName, model: info.Model})
+	if err != nil {
 		return handleError(c, err)
 	}
+	defer adm.release()
 
 	ctx, _ := requestContextWithRequestID(c.Request())
 	c.SetRequest(c.Request().WithContext(ctx))

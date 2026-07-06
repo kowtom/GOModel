@@ -32,6 +32,7 @@ import (
 	"gomodel/internal/live"
 	"gomodel/internal/pricingoverrides"
 	"gomodel/internal/providers"
+	"gomodel/internal/ratelimit"
 	"gomodel/internal/responsecache"
 	"gomodel/internal/responsestore"
 	"gomodel/internal/server"
@@ -50,6 +51,7 @@ type App struct {
 	audit            *auditlog.Result
 	usage            *usage.Result
 	budgets          *budget.Result
+	rateLimits       *ratelimit.Result
 	batch            *batch.Result
 	fileStore        *filestore.Result
 	responseStore    *responsestore.Result
@@ -230,6 +232,29 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	app.budgets = budgetResult
 	closers = append(closers, app.budgets.Close)
 
+	var rateLimitResult *ratelimit.Result
+	if appCfg.RateLimits.Enabled {
+		if sharedStorage != nil {
+			rateLimitResult, err = ratelimit.NewWithSharedStorage(ctx, appCfg, sharedStorage)
+		} else {
+			rateLimitResult, err = ratelimit.New(ctx, appCfg)
+		}
+		if err != nil {
+			return fail("failed to initialize rate limits", err)
+		}
+		if rateLimitResult.Service.HasTokenRules() && !appCfg.Usage.Enabled {
+			slog.Warn("token rate limits configured but usage tracking is disabled; max_tokens limits will not be enforced",
+				"usage_enabled", false,
+				"hint", "enable usage tracking to enforce token rate limits, or remove max_tokens from rate limit rules",
+			)
+		}
+	} else {
+		rateLimitResult = &ratelimit.Result{}
+		slog.Info("rate limits disabled")
+	}
+	app.rateLimits = rateLimitResult
+	closers = append(closers, app.rateLimits.Close)
+
 	// Initialize batch lifecycle storage.
 	var batchResult *batch.Result
 	if sharedStorage != nil {
@@ -288,12 +313,15 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	claimSharedStorage(conversationStoreResult.Storage)
 
 	// Initialize virtual models (unified aliases + access overrides) using
-	// shared storage when already available.
+	// shared storage when already available. The catalog is rate-limit aware
+	// so load balancing skips saturated providers/models while capacity
+	// exists elsewhere (RouteAvailable is nil-safe when rate limits are off).
+	virtualModelCatalog := newRateLimitAwareCatalog(providerResult.Registry, rateLimitResult.Service)
 	var virtualModelsResult *virtualmodels.Result
 	if sharedStorage != nil {
-		virtualModelsResult, err = virtualmodels.NewWithSharedStorage(ctx, appCfg, sharedStorage, providerResult.Registry)
+		virtualModelsResult, err = virtualmodels.NewWithSharedStorage(ctx, appCfg, sharedStorage, virtualModelCatalog)
 	} else {
-		virtualModelsResult, err = virtualmodels.New(ctx, appCfg, providerResult.Registry)
+		virtualModelsResult, err = virtualmodels.New(ctx, appCfg, virtualModelCatalog)
 	}
 	if err != nil {
 		return fail("failed to initialize virtual models", err)
@@ -452,6 +480,14 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 			"recommendation", "rebuild with -tags=swagger")
 	}
 
+	// The usage tap feeds recorded token counts into rate limit token windows
+	// before delegating to the real logger; it is transparent when no rate
+	// limit service exists.
+	serverUsageLogger := usage.LoggerInterface(usageResult.Logger)
+	if rateLimitResult.Service != nil {
+		serverUsageLogger = ratelimit.NewUsageTap(serverUsageLogger, rateLimitResult.Service)
+	}
+
 	serverCfg := &server.Config{
 		BasePath:                        appCfg.Server.BasePath,
 		MasterKey:                       appCfg.Server.MasterKey,
@@ -461,7 +497,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		BodySizeLimit:                   appCfg.Server.BodySizeLimit,
 		PprofEnabled:                    appCfg.Server.PprofEnabled,
 		AuditLogger:                     auditResult.Logger,
-		UsageLogger:                     usageResult.Logger,
+		UsageLogger:                     serverUsageLogger,
 		BudgetChecker:                   budgetResult.Service,
 		PricingResolver:                 pricingResolver,
 		ModelResolver:                   vm,
@@ -485,6 +521,12 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		UserPathHeader:                  appCfg.Server.UserPathHeader,
 		SwaggerEnabled:                  swaggerEnabled,
 		Tagging:                         taggingResult.Service,
+	}
+
+	// Assigned conditionally so a disabled feature leaves the interface nil
+	// (a typed-nil *ratelimit.Service would defeat the fast nil check).
+	if rateLimitResult.Service != nil {
+		serverCfg.RateLimiter = rateLimitResult.Service
 	}
 
 	applyExtensions(serverCfg, cfg.Extensions)
@@ -517,6 +559,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 			workflowResult.Service,
 			app.guardrails.Service,
 			budgetResult.Service,
+			rateLimitResult.Service,
 			taggingResult.Service,
 			app,
 			dashboardRuntimeConfig(appCfg, usageEnabledForDashboard),
@@ -577,9 +620,11 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		WorkflowPolicyResolver: workflowResult.Service,
 		FailoverResolver:       serverCfg.FailoverResolver,
 		AuditLogger:            auditResult.Logger,
-		UsageLogger:            usageResult.Logger,
-		PricingResolver:        pricingResolver,
-		ResponseCache:          rcm,
+		// The tapped logger, so guardrail LLM calls count toward the
+		// request's rate limit token windows like any other completion.
+		UsageLogger:     serverUsageLogger,
+		PricingResolver: pricingResolver,
+		ResponseCache:   rcm,
 	})
 	if err := guardrailResult.Service.SetExecutor(ctx, internalGuardrailExecutor); err != nil {
 		return fail("failed to wire internal guardrail executor", err)
@@ -853,6 +898,14 @@ func (a *App) Shutdown(ctx context.Context) error {
 		}
 	}
 
+	// 13b. Close rate limit subsystem.
+	if a.rateLimits != nil {
+		if err := a.rateLimits.Close(); err != nil {
+			slog.Error("rate limits close error", "error", err)
+			errs = append(errs, fmt.Errorf("rate limits close: %w", err))
+		}
+	}
+
 	// 14. Close usage tracking (flushes pending entries)
 	if a.usage != nil {
 		if err := a.usage.Close(); err != nil {
@@ -944,6 +997,7 @@ func initAdmin(
 	workflowService *workflows.Service,
 	guardrailService *guardrails.Service,
 	budgetService *budget.Service,
+	rateLimitService *ratelimit.Service,
 	taggingService *tagging.Service,
 	runtimeRefresher admin.RuntimeRefresher,
 	runtimeConfig admin.DashboardConfigResponse,
@@ -1004,6 +1058,7 @@ func initAdmin(
 		admin.WithWorkflows(workflowService),
 		admin.WithGuardrailService(guardrailService),
 		admin.WithBudgets(budgetService),
+		admin.WithRateLimits(rateLimitService),
 		admin.WithTagging(taggingService),
 		admin.WithRuntimeRefresher(runtimeRefresher),
 		admin.WithDashboardRuntimeConfig(runtimeConfig),
@@ -1134,6 +1189,7 @@ func dashboardRuntimeConfig(cfg *config.Config, usageEnabled bool) admin.Dashboa
 		LoggingEnabled:       dashboardEnabledValue(cfg != nil && cfg.Logging.Enabled),
 		UsageEnabled:         dashboardEnabledValue(cfg != nil && cfg.Usage.Enabled),
 		BudgetsEnabled:       dashboardEnabledValue(cfg != nil && cfg.Budgets.Enabled),
+		RateLimitsEnabled:    dashboardEnabledValue(cfg != nil && cfg.RateLimits.Enabled),
 		GuardrailsEnabled:    dashboardEnabledValue(cfg != nil && cfg.Guardrails.Enabled),
 		CacheEnabled:         dashboardEnabledValue(cacheAnalyticsConfigured(cfg, usageEnabled)),
 		RedisURL:             dashboardEnabledValue(simpleResponseCacheConfigured(cfg)),

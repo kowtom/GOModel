@@ -32,6 +32,7 @@ type Handler struct {
 	logger                          auditlog.LoggerInterface
 	usageLogger                     usage.LoggerInterface
 	budgetChecker                   BudgetChecker
+	rateLimiter                     RateLimiter
 	pricingResolver                 usage.PricingResolver
 	batchStore                      batchstore.Store
 	fileStore                       filestore.Store
@@ -170,6 +171,7 @@ func (h *Handler) translatedInference() *translatedInferenceService {
 			logger:                   h.logger,
 			usageLogger:              h.usageLogger,
 			budgetChecker:            h.budgetChecker,
+			rateLimiter:              h.rateLimiter,
 			pricingResolver:          h.pricingResolver,
 			responseCache:            h.responseCache,
 			guardrailsHash:           h.guardrailsHash,
@@ -200,6 +202,7 @@ func (h *Handler) nativeBatch() *nativeBatchService {
 		cleanupStoredBatchRewrittenInputFile: h.cleanupStoredBatchRewrittenInputFile,
 		usageLogger:                          h.usageLogger,
 		budgetChecker:                        h.budgetChecker,
+		rateLimiter:                          h.rateLimiter,
 		pricingResolver:                      h.pricingResolver,
 	}
 }
@@ -219,6 +222,7 @@ func (h *Handler) audio() *audioService {
 		provider:        h.provider,
 		modelAuthorizer: h.modelAuthorizer,
 		budgetChecker:   h.budgetChecker,
+		rateLimiter:     h.rateLimiter,
 		logBodies:       logBodies,
 		logAudioBodies:  logAudioBodies,
 		usageLogger:     h.usageLogger,
@@ -254,6 +258,7 @@ func (h *Handler) realtime() *realtimeService {
 		provider:        h.provider,
 		modelAuthorizer: h.modelAuthorizer,
 		budgetChecker:   h.budgetChecker,
+		rateLimiter:     h.rateLimiter,
 		usageLogger:     h.usageLogger,
 		pricingResolver: h.pricingResolver,
 		enabled:         h.realtimeEnabled,
@@ -267,6 +272,7 @@ func (h *Handler) passthrough() *passthroughService {
 		logger:                       h.logger,
 		usageLogger:                  h.usageLogger,
 		budgetChecker:                h.budgetChecker,
+		rateLimiter:                  h.rateLimiter,
 		pricingResolver:              h.pricingResolver,
 		normalizePassthroughV1Prefix: h.normalizePassthroughV1Prefix,
 		enabledPassthroughProviders:  h.enabledPassthroughProviders,

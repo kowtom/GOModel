@@ -219,6 +219,7 @@ function dashboard() {
         "overview",
         "usage",
         "budgets",
+        "rate-limits",
         "models",
         "workflows",
         "audit-logs",
@@ -259,6 +260,14 @@ function dashboard() {
       }
       if (page === "budgets" && typeof this.fetchBudgetsPage === "function") {
         this.fetchBudgetsPage();
+      }
+      // The models page needs rules too: its gauge buttons indicate which
+      // models and providers have direct or inherited rate limits.
+      if (
+        (page === "rate-limits" || page === "models") &&
+        typeof this.fetchRateLimitsPage === "function"
+      ) {
+        this.fetchRateLimitsPage();
       }
       if (page === "settings") {
         if (typeof this.ensureTimezoneOptions === "function") {
@@ -449,6 +458,9 @@ function dashboard() {
         (this.page === "guardrails" && this.guardrailFormOpen) ||
         (this.page === "auth-keys" && this.authKeyFormOpen) ||
         (this.page === "budgets" && this.budgetFormOpen) ||
+        ((this.page === "rate-limits" || this.page === "models") &&
+          this.rateLimitFormOpen) ||
+        (this.page === "models" && this.rateLimitInspectorOpen) ||
         this.budgetResetDialogOpen ||
         this.pricingRecalculateDialogOpen ||
         (this.typedConfirmationDialog && this.typedConfirmationDialog.open)
@@ -649,6 +661,14 @@ function dashboard() {
         typeof this.fetchBudgetsPage === "function"
       ) {
         requests.push(this.fetchBudgetsPage());
+      }
+      // The models page needs rules too: its gauge buttons indicate which
+      // models and providers have direct or inherited rate limits.
+      if (
+        (this.page === "rate-limits" || this.page === "models") &&
+        typeof this.fetchRateLimitsPage === "function"
+      ) {
+        requests.push(this.fetchRateLimitsPage());
       }
       if (
         this.hasCalendarModule &&
@@ -1193,6 +1213,12 @@ function dashboard() {
         ? dashboardBudgetsModule
         : null,
       "dashboardBudgetsModule",
+    ),
+    resolveModuleFactory(
+      typeof dashboardRateLimitsModule === "function"
+        ? dashboardRateLimitsModule
+        : null,
+      "dashboardRateLimitsModule",
     ),
     resolveModuleFactory(
       typeof dashboardTaggingModule === "function"
