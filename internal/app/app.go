@@ -313,12 +313,19 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	claimSharedStorage(conversationStoreResult.Storage)
 
 	// Initialize virtual models (unified aliases + access overrides) using
-	// shared storage when already available.
+	// shared storage when already available. Provider names declared in YAML —
+	// including entries whose credentials did not resolve, which never register —
+	// let validation tell a misspelled target provider (abort startup) from a
+	// declared-but-inactive one (warn, target stays unavailable).
+	declaredProviders := make([]string, 0, len(cfg.AppConfig.RawProviders))
+	for name := range cfg.AppConfig.RawProviders {
+		declaredProviders = append(declaredProviders, name)
+	}
 	var virtualModelsResult *virtualmodels.Result
 	if sharedStorage != nil {
-		virtualModelsResult, err = virtualmodels.NewWithSharedStorage(ctx, appCfg, sharedStorage, providerResult.Registry)
+		virtualModelsResult, err = virtualmodels.NewWithSharedStorage(ctx, appCfg, sharedStorage, providerResult.Registry, declaredProviders)
 	} else {
-		virtualModelsResult, err = virtualmodels.New(ctx, appCfg, providerResult.Registry)
+		virtualModelsResult, err = virtualmodels.New(ctx, appCfg, providerResult.Registry, declaredProviders)
 	}
 	if err != nil {
 		return fail("failed to initialize virtual models", err)
