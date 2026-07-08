@@ -5157,6 +5157,69 @@ const docTemplate = `{
                     }
                 ]
             }
+        },
+        "/v1/usage": {
+            "get": {
+                "description": "Returns recorded usage, budget statuses, and rate limit statuses for the caller's effective user path (the path bound to the managed API key, or the user-path header for master-key callers).",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "usage"
+                ],
+                "summary": "Self-service usage, budget, and rate limit status",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Inclusive window start (YYYY-MM-DD, UTC); defaults to 29 days before end_date",
+                        "name": "start_date",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Inclusive window end (YYYY-MM-DD, UTC); defaults to today; the whole range may span at most 365 days",
+                        "name": "end_date",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Window length ending today when no explicit dates are given (default 30, max 365)",
+                        "name": "days",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/server.usageStatusResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ]
+            }
         }
     },
     "definitions": {
@@ -6350,6 +6413,10 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "seq": {
+                    "type": "integer"
+                },
+                "tokens_saved": {
+                    "description": "TokensSaved is the rewriter-reported estimate of prompt tokens this\nrevision saved (e.g. token compression); zero when the rewriter does\nnot report savings.",
                     "type": "integer"
                 }
             }
@@ -8186,6 +8253,173 @@ const docTemplate = `{
                 }
             }
         },
+        "server.usageStatusBudget": {
+            "type": "object",
+            "properties": {
+                "amount": {
+                    "type": "number"
+                },
+                "exceeded": {
+                    "type": "boolean"
+                },
+                "period_end": {
+                    "type": "string"
+                },
+                "period_label": {
+                    "type": "string"
+                },
+                "period_seconds": {
+                    "type": "integer"
+                },
+                "period_start": {
+                    "type": "string"
+                },
+                "remaining": {
+                    "type": "number"
+                },
+                "resets_in_seconds": {
+                    "type": "integer"
+                },
+                "spent": {
+                    "type": "number"
+                },
+                "usage_ratio": {
+                    "description": "UsageRatio is spent/amount, deliberately unclamped: values above 1\nmean the budget is blown through.",
+                    "type": "number"
+                },
+                "user_path": {
+                    "type": "string"
+                }
+            }
+        },
+        "server.usageStatusRateLimit": {
+            "type": "object",
+            "properties": {
+                "exhausted": {
+                    "type": "boolean"
+                },
+                "in_flight": {
+                    "type": "integer"
+                },
+                "max_requests": {
+                    "type": "integer"
+                },
+                "max_tokens": {
+                    "type": "integer"
+                },
+                "period_label": {
+                    "type": "string"
+                },
+                "period_seconds": {
+                    "type": "integer"
+                },
+                "requests_remaining": {
+                    "type": "integer"
+                },
+                "requests_usage_ratio": {
+                    "description": "The usage ratios are used/limit per dimension, present only when that\nlimit exists and unclamped (token windows can overshoot past 1).",
+                    "type": "number"
+                },
+                "requests_used": {
+                    "type": "integer"
+                },
+                "resets_in_seconds": {
+                    "type": "integer"
+                },
+                "tokens_remaining": {
+                    "type": "integer"
+                },
+                "tokens_usage_ratio": {
+                    "type": "number"
+                },
+                "tokens_used": {
+                    "type": "integer"
+                },
+                "user_path": {
+                    "type": "string"
+                },
+                "window_end": {
+                    "type": "string"
+                },
+                "window_start": {
+                    "type": "string"
+                }
+            }
+        },
+        "server.usageStatusResponse": {
+            "type": "object",
+            "properties": {
+                "budgets": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/server.usageStatusBudget"
+                    }
+                },
+                "rate_limits": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/server.usageStatusRateLimit"
+                    }
+                },
+                "server_time": {
+                    "type": "string"
+                },
+                "usage": {
+                    "$ref": "#/definitions/server.usageStatusSummary"
+                },
+                "user_path": {
+                    "type": "string"
+                }
+            }
+        },
+        "server.usageStatusSummary": {
+            "type": "object",
+            "properties": {
+                "cache_write_input_tokens": {
+                    "type": "integer"
+                },
+                "cached_input_tokens": {
+                    "type": "integer"
+                },
+                "end_date": {
+                    "type": "string"
+                },
+                "rewrite_cost_saved": {
+                    "type": "number"
+                },
+                "rewrite_tokens_saved": {
+                    "description": "Rewrite savings: prompt tokens request rewriters removed before the\nprovider call, and the estimated input cost avoided (nil when no\nmatched row had a priced savings estimate).",
+                    "type": "integer"
+                },
+                "start_date": {
+                    "type": "string"
+                },
+                "total_cost": {
+                    "type": "number"
+                },
+                "total_input_cost": {
+                    "type": "number"
+                },
+                "total_input_tokens": {
+                    "type": "integer"
+                },
+                "total_output_cost": {
+                    "type": "number"
+                },
+                "total_output_tokens": {
+                    "type": "integer"
+                },
+                "total_requests": {
+                    "type": "integer"
+                },
+                "total_tokens": {
+                    "type": "integer"
+                },
+                "uncached_input_tokens": {
+                    "type": "integer"
+                }
+            }
+        },
         "tagging.Rule": {
             "type": "object",
             "properties": {
@@ -8424,6 +8658,12 @@ const docTemplate = `{
                 "output_tokens": {
                     "type": "integer"
                 },
+                "rewrite_cost_saved": {
+                    "type": "number"
+                },
+                "rewrite_tokens_saved": {
+                    "type": "integer"
+                },
                 "total_tokens": {
                     "type": "integer"
                 },
@@ -8532,6 +8772,12 @@ const docTemplate = `{
                 },
                 "request_id": {
                     "type": "string"
+                },
+                "rewrite_cost_saved": {
+                    "type": "number"
+                },
+                "rewrite_tokens_saved": {
+                    "type": "integer"
                 },
                 "timestamp": {
                     "type": "string"

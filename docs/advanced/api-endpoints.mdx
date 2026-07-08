@@ -10,8 +10,8 @@ documented separately in [Admin Endpoints](/advanced/admin-endpoints).
 
 For request and response details, see the dedicated guides:
 [Responses API](/advanced/responses-api), [Conversations API](/advanced/conversations-api),
-[Anthropic Messages API](/advanced/anthropic-messages-api), and
-[Audio API](/advanced/audio-api).
+[Anthropic Messages API](/advanced/anthropic-messages-api),
+[Audio API](/advanced/audio-api), and [Usage API](/advanced/usage-api).
 
 ## OpenAI-Compatible API
 
@@ -53,6 +53,12 @@ For request and response details, see the dedicated guides:
 | --------------------------- | ------ | ----------------------------------------------------------------------------- |
 | `/v1/messages`              | POST   | Anthropic Messages API through translated model routing (streaming supported) |
 | `/v1/messages/count_tokens` | POST   | Heuristic Anthropic Messages input token estimate                             |
+
+## Gateway Extensions
+
+| Endpoint    | Method | Description                                                                                                                              |
+| ----------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `/v1/usage` | GET    | Self-service usage, budget, and rate limit status for the caller's effective user path — see [Usage API](/advanced/usage-api) |
 
 ## Provider Passthrough
 
