@@ -132,6 +132,7 @@
                     "providers/anthropic",
                     "providers/gemini",
                     "providers/deepseek",
+                    "providers/xai",
                     "providers/bailian",
                     "providers/xiaomi",
                     "providers/opencode-go",
