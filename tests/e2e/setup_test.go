@@ -15,6 +15,7 @@ import (
 
 	"github.com/enterpilot/gomodel/internal/admin"
 	"github.com/enterpilot/gomodel/internal/admin/dashboard"
+	"github.com/enterpilot/gomodel/internal/mcpgateway"
 	"github.com/enterpilot/gomodel/internal/providers"
 	"github.com/enterpilot/gomodel/internal/server"
 	"github.com/enterpilot/gomodel/internal/usage"
@@ -39,6 +40,8 @@ type e2eServerOptions struct {
 	// resolution and translated-route failover.
 	modelResolver    server.RequestModelResolver
 	failoverResolver server.RequestFailoverResolver
+	// mcpGateway enables the /mcp routes when set.
+	mcpGateway *mcpgateway.Service
 }
 
 type e2eUsageFixture struct {
@@ -98,6 +101,10 @@ func setupE2EServer(t *testing.T, opts e2eServerOptions) *server.Server {
 		ModelResolver:         opts.modelResolver,
 		FailoverResolver:      opts.failoverResolver,
 		AdminEndpointsEnabled: opts.adminEndpointsEnabled,
+	}
+	if opts.mcpGateway != nil {
+		cfg.MCPEnabled = true
+		cfg.MCPGateway = opts.mcpGateway
 	}
 
 	if opts.adminEndpointsEnabled {
