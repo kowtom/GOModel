@@ -19,7 +19,7 @@ helm install gomodel oci://registry-1.docker.io/enterpilot/gomodel \
 > `helm-v*` tag is created.
 >
 > You can also install directly from a local checkout:
-> `helm install gomodel ./helm -n gomodel --create-namespace`.
+> `helm install gomodel ./deploy/helm/gomodel -n gomodel --create-namespace`.
 
 ## Introduction
 

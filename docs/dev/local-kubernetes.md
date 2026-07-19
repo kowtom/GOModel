@@ -2,7 +2,7 @@
 
 Develop GoModel against a local [kind](https://kind.sigs.k8s.io/) cluster using
 [Skaffold](https://skaffold.dev/) for a build → deploy → watch loop. The app is
-deployed through the same production [Helm chart](../../helm) with dev overrides,
+deployed through the same production [Helm chart](../../deploy/helm/gomodel) with dev overrides,
 so you exercise the real Kubernetes, storage and cache code paths locally.
 
 ## Prerequisites

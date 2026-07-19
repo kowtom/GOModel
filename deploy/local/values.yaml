@@ -1,5 +1,5 @@
 # Helm values for local Kubernetes development.
-# Used by skaffold.yaml (deploy.helm) and layered on top of helm/values.yaml.
+# Used by skaffold.yaml (deploy.helm) and layered on top of deploy/helm/gomodel/values.yaml.
 #
 # This deploys GoModel in the production-like STATELESS mode backed by the
 # in-cluster Redis + PostgreSQL from deploy/local/deps.yaml, so the real

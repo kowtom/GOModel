@@ -28,7 +28,7 @@ manifests:
   helm:
     releases:
       - name: gomodel
-        chartPath: helm
+        chartPath: deploy/helm/gomodel
         valuesFiles:
           - deploy/local/values.yaml
         # Rewrite image.repository/tag to the Skaffold-built, kind-loaded image.

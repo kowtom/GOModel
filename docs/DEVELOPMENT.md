@@ -66,7 +66,7 @@ Releases are generated automatically from merged PRs, categorized by labels and 
 You can compress the whole repository for LLMs with the following command:
 
 ```
-$ repomix -i "./*.md,./**/*_test.go,./tests/,./**/*.md,./.claude/,./data/,./docs/,./helm/,./.cache/,./.github/,./cmd/gomodel/docs/" --style=markdown --remove-comments
+$ repomix -i "./*.md,./**/*_test.go,./tests/,./**/*.md,./.claude/,./data/,./docs/,./deploy/,./.cache/,./.github/,./cmd/gomodel/docs/" --style=markdown --remove-comments
 ```
 
 ## Log output
