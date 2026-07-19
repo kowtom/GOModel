@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 db_path="${SQLITE_PATH:-data/gomodel.db}"
 days="${DEMO_DAYS:-90}"
 end_date="${DEMO_END_DATE:-}"
 avg_requests="${DEMO_AVG_REQUESTS_PER_DAY:-850}"
 max_requests="${DEMO_MAX_REQUESTS_PER_DAY:-1600}"
+token_scale="${DEMO_TOKEN_SCALE:-3}"
 exact_cache_pct="${DEMO_EXACT_CACHE_PCT:-12}"
 semantic_cache_pct="${DEMO_SEMANTIC_CACHE_PCT:-7}"
 prompt_cache_pct="${DEMO_PROMPT_CACHE_PCT:-28}"
+rewrite_pct="${DEMO_REWRITE_PCT:-18}"
 prefix="${DEMO_SEED_PREFIX:-demo-generated}"
 
 usage() {
@@ -21,10 +24,12 @@ Environment:
   DEMO_END_DATE                   End date YYYY-MM-DD (default: today UTC)
   DEMO_AVG_REQUESTS_PER_DAY       Average daily request count (default: 850)
   DEMO_MAX_REQUESTS_PER_DAY       Upper slot cap per day (default: 1600)
+  DEMO_TOKEN_SCALE                Token volume multiplier (default: 3)
   DEMO_EXACT_CACHE_PCT            Local exact cache hit percentage (default: 12)
   DEMO_SEMANTIC_CACHE_PCT         Local semantic cache hit percentage (default: 7)
   DEMO_PROMPT_CACHE_PCT           Provider prompt-cache percentage (default: 28)
-  DEMO_SEED_PREFIX                Row ID/budget source prefix; reruns replace this prefix only (default: demo-generated)
+  DEMO_REWRITE_PCT                Eligible text requests with rewrite savings (default: 18)
+  DEMO_SEED_PREFIX                Generated row/source prefix; reruns replace this prefix only (default: demo-generated)
 EOF
 }
 
@@ -45,9 +50,11 @@ require_int() {
 require_int DEMO_DAYS "$days"
 require_int DEMO_AVG_REQUESTS_PER_DAY "$avg_requests"
 require_int DEMO_MAX_REQUESTS_PER_DAY "$max_requests"
+require_int DEMO_TOKEN_SCALE "$token_scale"
 require_int DEMO_EXACT_CACHE_PCT "$exact_cache_pct"
 require_int DEMO_SEMANTIC_CACHE_PCT "$semantic_cache_pct"
 require_int DEMO_PROMPT_CACHE_PCT "$prompt_cache_pct"
+require_int DEMO_REWRITE_PCT "$rewrite_pct"
 
 if (( days < 1 )); then
   echo "DEMO_DAYS must be at least 1" >&2
@@ -57,12 +64,20 @@ if (( max_requests < avg_requests )); then
   echo "DEMO_MAX_REQUESTS_PER_DAY must be >= DEMO_AVG_REQUESTS_PER_DAY" >&2
   exit 2
 fi
+if (( token_scale < 1 || token_scale > 10 )); then
+  echo "DEMO_TOKEN_SCALE must be between 1 and 10" >&2
+  exit 2
+fi
 if (( exact_cache_pct + semantic_cache_pct > 65 )); then
   echo "Exact + semantic cache percentages should stay realistic and <= 65" >&2
   exit 2
 fi
 if (( prompt_cache_pct > 85 )); then
   echo "DEMO_PROMPT_CACHE_PCT must be <= 85" >&2
+  exit 2
+fi
+if (( rewrite_pct > 60 )); then
+  echo "DEMO_REWRITE_PCT must be <= 60" >&2
   exit 2
 fi
 if [[ -n "$end_date" && ! "$end_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
@@ -78,14 +93,72 @@ command -v sqlite3 >/dev/null 2>&1 || {
   echo "sqlite3 is required" >&2
   exit 127
 }
+command -v openssl >/dev/null 2>&1 || {
+  echo "openssl is required to generate demo API keys" >&2
+  exit 127
+}
+
+demo_key_secret_team1="$(openssl rand -hex 24)"
+demo_key_secret_engineering="$(openssl rand -hex 24)"
+demo_key_secret_sales="$(openssl rand -hex 24)"
+demo_key_hash_team1="$(printf '%s' "$demo_key_secret_team1" | openssl dgst -sha256 -r | awk '{print $1}')"
+demo_key_hash_engineering="$(printf '%s' "$demo_key_secret_engineering" | openssl dgst -sha256 -r | awk '{print $1}')"
+demo_key_hash_sales="$(printf '%s' "$demo_key_secret_sales" | openssl dgst -sha256 -r | awk '{print $1}')"
+demo_key_redacted_team1="sk_gom_...${demo_key_secret_team1: -4}"
+demo_key_redacted_engineering="sk_gom_...${demo_key_secret_engineering: -4}"
+demo_key_redacted_sales="sk_gom_...${demo_key_secret_sales: -4}"
+
+# A compact spoken fixture saying "Prompt caching is active." Keeping it
+# separate from the SQL makes every generated STT upload and TTS response
+# playable without requiring provider credentials during seeding.
+demo_audio_mp3_base64="$(tr -d '\r\n' < "$script_dir/fixtures/demo-prompt-caching.mp3.base64")"
+demo_audio_mp3_bytes="$(printf '%s' "$demo_audio_mp3_base64" | openssl base64 -d -A | wc -c | awk '{print $1}')"
 
 mkdir -p "$(dirname "$db_path")"
 
 sqlite3 "$db_path" "PRAGMA journal_mode = WAL;" >/dev/null
 
-# Databases created before the labelling feature lack the labels column; add
-# it when missing (the error on fresh or already-migrated databases is benign).
+# Add columns introduced after the original demo seeder. Errors on fresh or
+# already-migrated databases are benign; the schema below handles fresh files.
 sqlite3 "$db_path" "ALTER TABLE usage ADD COLUMN labels JSON;" 2>/dev/null || true
+sqlite3 "$db_path" "ALTER TABLE usage ADD COLUMN rewrite_tokens_saved INTEGER NOT NULL DEFAULT 0;" 2>/dev/null || true
+sqlite3 "$db_path" "ALTER TABLE usage ADD COLUMN rewrite_cost_saved REAL;" 2>/dev/null || true
+sqlite3 "$db_path" "ALTER TABLE mcp_servers ADD COLUMN display_name TEXT NOT NULL DEFAULT '';" 2>/dev/null || true
+sqlite3 "$db_path" "ALTER TABLE auth_keys ADD COLUMN user_path TEXT;" 2>/dev/null || true
+sqlite3 "$db_path" "ALTER TABLE auth_keys ADD COLUMN labels JSON;" 2>/dev/null || true
+
+# make demo seeds before app startup, so migrate the rate-limit table here
+# when the database predates scoped user-path/provider/model rules.
+has_rate_limit_subject="$(sqlite3 "$db_path" "SELECT count(*) FROM pragma_table_info('rate_limits') WHERE name = 'subject';")"
+has_rate_limit_user_path="$(sqlite3 "$db_path" "SELECT count(*) FROM pragma_table_info('rate_limits') WHERE name = 'user_path';")"
+if [[ "$has_rate_limit_subject" == "0" && "$has_rate_limit_user_path" == "1" ]]; then
+  sqlite3 "$db_path" <<'SQL'
+.bail on
+.timeout 10000
+BEGIN IMMEDIATE;
+ALTER TABLE rate_limits RENAME TO rate_limits_pre_scope;
+CREATE TABLE rate_limits (
+  scope TEXT NOT NULL DEFAULT 'user_path',
+  subject TEXT NOT NULL,
+  period_seconds INTEGER NOT NULL,
+  max_requests INTEGER,
+  max_tokens INTEGER,
+  source TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (scope, subject, period_seconds)
+);
+INSERT INTO rate_limits (
+  scope, subject, period_seconds, max_requests, max_tokens, source, created_at, updated_at
+)
+SELECT
+  'user_path', user_path, period_seconds, max_requests, max_tokens, source, created_at, updated_at
+FROM rate_limits_pre_scope;
+DROP TABLE rate_limits_pre_scope;
+DROP INDEX IF EXISTS idx_rate_limits_user_path;
+COMMIT;
+SQL
+fi
 
 sqlite3 "$db_path" <<SQL
 .bail on
@@ -107,6 +180,8 @@ CREATE TABLE IF NOT EXISTS usage (
   input_tokens INTEGER NOT NULL DEFAULT 0,
   output_tokens INTEGER NOT NULL DEFAULT 0,
   total_tokens INTEGER NOT NULL DEFAULT 0,
+  rewrite_tokens_saved INTEGER NOT NULL DEFAULT 0,
+  rewrite_cost_saved REAL,
   raw_data JSON,
   input_cost REAL,
   output_cost REAL,
@@ -156,6 +231,71 @@ CREATE TABLE IF NOT EXISTS budget_settings (
   updated_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS rate_limits (
+  scope TEXT NOT NULL DEFAULT 'user_path',
+  subject TEXT NOT NULL,
+  period_seconds INTEGER NOT NULL,
+  max_requests INTEGER,
+  max_tokens INTEGER,
+  source TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (scope, subject, period_seconds)
+);
+
+CREATE TABLE IF NOT EXISTS mcp_servers (
+  name TEXT PRIMARY KEY,
+  display_name TEXT NOT NULL DEFAULT '',
+  url TEXT NOT NULL DEFAULT '',
+  transport TEXT NOT NULL DEFAULT 'http',
+  headers TEXT NOT NULL DEFAULT '{}',
+  description TEXT NOT NULL DEFAULT '',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  allowed_tools TEXT NOT NULL DEFAULT '[]',
+  disallowed_tools TEXT NOT NULL DEFAULT '[]',
+  user_paths TEXT NOT NULL DEFAULT '[]',
+  tool_timeout_seconds INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS auth_keys (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  user_path TEXT,
+  labels JSON,
+  redacted_value TEXT NOT NULL,
+  secret_hash TEXT NOT NULL UNIQUE,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  expires_at INTEGER,
+  deactivated_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS virtual_models (
+  source TEXT PRIMARY KEY,
+  targets TEXT NOT NULL DEFAULT '[]',
+  strategy TEXT NOT NULL DEFAULT '',
+  provider_name TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  user_paths TEXT NOT NULL DEFAULT '[]',
+  description TEXT NOT NULL DEFAULT '',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS failover_rules (
+  primary_model TEXT PRIMARY KEY,
+  fallback_models TEXT NOT NULL DEFAULT '[]',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  managed_source TEXT NOT NULL DEFAULT 'dashboard',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_usage_timestamp ON usage(timestamp);
 CREATE INDEX IF NOT EXISTS idx_usage_request_id ON usage(request_id);
 CREATE INDEX IF NOT EXISTS idx_usage_provider ON usage(provider);
@@ -169,12 +309,25 @@ CREATE INDEX IF NOT EXISTS idx_audit_user_path ON audit_logs(user_path);
 CREATE INDEX IF NOT EXISTS idx_audit_cache_type ON audit_logs(cache_type);
 CREATE INDEX IF NOT EXISTS idx_budgets_user_path ON budgets(user_path);
 CREATE INDEX IF NOT EXISTS idx_budgets_period_seconds ON budgets(period_seconds);
+CREATE INDEX IF NOT EXISTS idx_rate_limits_subject ON rate_limits(scope, subject);
+CREATE INDEX IF NOT EXISTS idx_mcp_servers_enabled ON mcp_servers(enabled);
+CREATE INDEX IF NOT EXISTS idx_mcp_servers_updated_at ON mcp_servers(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_auth_keys_enabled ON auth_keys(enabled);
+CREATE INDEX IF NOT EXISTS idx_auth_keys_created_at ON auth_keys(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_virtual_models_enabled ON virtual_models(enabled);
+CREATE INDEX IF NOT EXISTS idx_virtual_models_updated_at ON virtual_models(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_failover_rules_enabled ON failover_rules(enabled);
+CREATE INDEX IF NOT EXISTS idx_failover_rules_updated_at ON failover_rules(updated_at DESC);
 
 BEGIN IMMEDIATE;
 
 DELETE FROM audit_logs WHERE id GLOB '${prefix}-*';
 DELETE FROM usage WHERE id GLOB '${prefix}-*';
 DELETE FROM budgets WHERE source = '${prefix}';
+DELETE FROM rate_limits WHERE source = '${prefix}';
+DELETE FROM auth_keys WHERE id GLOB '${prefix}-key-*';
+DELETE FROM virtual_models WHERE description GLOB '${prefix}:*';
+DELETE FROM failover_rules WHERE managed_source = '${prefix}';
 
 DROP TABLE IF EXISTS temp.demo_days;
 CREATE TEMP TABLE demo_days AS
@@ -261,6 +414,7 @@ SELECT
   abs(random()) % 10000 AS template_bucket,
   abs(random()) % 10000 AS cache_bucket,
   abs(random()) % 10000 AS prompt_bucket,
+  abs(random()) % 10000 AS rewrite_bucket,
   abs(random()) % 10000 AS label_bucket,
   abs(random()) % 86400 AS second_of_day,
   abs(random()) AS token_noise
@@ -293,8 +447,8 @@ WITH chosen AS (
 tokens AS (
   SELECT
     *,
-    input_min + (token_noise % input_span) AS input_tokens,
-    output_min + ((token_noise / 97) % output_span) AS output_tokens
+    (input_min + (token_noise % input_span)) * ${token_scale} AS input_tokens,
+    (output_min + ((token_noise / 97) % output_span)) * ${token_scale} AS output_tokens
   FROM chosen
 ),
 cache_decisions AS (
@@ -314,6 +468,18 @@ cache_decisions AS (
     END AS prompt_cache_hit
   FROM tokens
 ),
+rewrite_decisions AS (
+  SELECT
+    *,
+    CASE
+      WHEN cache_type IS NULL
+        AND label IN ('chat-openai', 'chat-groq', 'chat-gemini', 'chat-bailian', 'responses', 'messages')
+        AND rewrite_bucket < (${rewrite_pct} * 100)
+      THEN 1
+      ELSE 0
+    END AS rewrite_hit
+  FROM cache_decisions
+),
 prompt_parts AS (
   SELECT
     *,
@@ -325,11 +491,15 @@ prompt_parts AS (
       WHEN prompt_cache_hit = 1 AND provider = 'anthropic' THEN CAST(input_tokens * (8 + (prompt_bucket % 13)) / 100 AS INTEGER)
       ELSE 0
     END AS prompt_cache_write_tokens
-  FROM cache_decisions
+  FROM rewrite_decisions
 )
 SELECT
   *,
   input_tokens + output_tokens AS total_tokens,
+  CASE
+    WHEN rewrite_hit = 1 THEN CAST(input_tokens * (8 + ((token_noise / 17) % 23)) / 100 AS INTEGER)
+    ELSE 0
+  END AS rewrite_tokens_saved,
   strftime('%Y-%m-%dT%H:%M:%fZ', day || ' 00:00:00', '+' || second_of_day || ' seconds') AS timestamp,
   '${prefix}-usage-' || day_idx || '-' || slot_idx AS usage_id,
   '${prefix}-audit-' || day_idx || '-' || slot_idx AS audit_id,
@@ -340,7 +510,8 @@ FROM prompt_parts;
 INSERT INTO usage (
   id, request_id, provider_id, timestamp, model, provider, provider_name,
   endpoint, user_path, cache_type, labels, input_tokens, output_tokens, total_tokens,
-  raw_data, input_cost, output_cost, total_cost, cost_source, costs_calculation_caveat
+  rewrite_tokens_saved, rewrite_cost_saved, raw_data,
+  input_cost, output_cost, total_cost, cost_source, costs_calculation_caveat
 )
 SELECT
   usage_id,
@@ -366,7 +537,12 @@ SELECT
   input_tokens,
   output_tokens,
   total_tokens,
+  rewrite_tokens_saved,
   CASE
+    WHEN rewrite_tokens_saved > 0 THEN round(rewrite_tokens_saved * input_price / 1000000.0, 8)
+    ELSE NULL
+  END AS rewrite_cost_saved,
+  json_patch(CASE
     WHEN cache_type = 'exact' THEN json_object(
       'demo_seed', 1,
       'cache_story', 'exact local response cache hit',
@@ -395,7 +571,14 @@ SELECT
       'prompt_cached_tokens', prompt_cached_tokens
     )
     ELSE json_object('demo_seed', 1, 'cache_story', 'uncached provider request')
-  END AS raw_data,
+  END, CASE
+    WHEN rewrite_hit = 1 THEN json_object(
+      'rewrite_story', 'prompt context compressed before provider routing',
+      'rewrite_tokens_saved', rewrite_tokens_saved,
+      'rewriter', 'demo-context-compression'
+    )
+    ELSE json_object()
+  END) AS raw_data,
   round((CASE
     WHEN cache_type IS NOT NULL THEN 0
     WHEN prompt_cache_hit = 1 THEN ((input_tokens - prompt_cached_tokens) * input_price + prompt_cached_tokens * input_price * 0.25) / 1000000.0
@@ -479,6 +662,26 @@ SELECT
       WHEN prompt_cache_hit = 1 THEN 'Provider prompt cache telemetry'
       ELSE 'Uncached provider request'
     END,
+    'request_revisions', json(CASE
+      WHEN rewrite_hit = 1 THEN json_array(json_object(
+        'seq', 1,
+        'rewriter', 'demo-context-compression',
+        'bytes_before', 12000 + (token_noise % 28000),
+        'bytes_after', CAST((12000 + (token_noise % 28000)) * (62 + (rewrite_bucket % 24)) / 100 AS INTEGER),
+        'tokens_saved', rewrite_tokens_saved,
+        'body', json_object(
+          'model', provider_name || '/' || model,
+          'input', 'Compressed context for ' || user_path || ': retain gateway totals, cache behavior, budget risk, and action items.',
+          'metadata', json_object('demo', json('true'), 'rewritten', json('true'))
+        ),
+        'detail', json_object(
+          'strategy', 'context-compression',
+          'tokens_saved_estimate', rewrite_tokens_saved,
+          'preserved_sections', json_array('usage', 'cache', 'budget', 'actions')
+        )
+      ))
+      ELSE 'null'
+    END),
     'request_body', json(CASE
       WHEN label IN ('chat-openai', 'chat-groq', 'chat-gemini', 'chat-bailian') THEN json_object(
         'model', provider_name || '/' || model,
@@ -531,20 +734,23 @@ SELECT
       WHEN label = 'stt' THEN json_object(
         '__audio__', json('true'),
         'content_type', 'audio/mpeg',
-        'bytes', 48000 + (token_noise % 180000),
-        'stored', json('false'),
+        'bytes', ${demo_audio_mp3_bytes},
+        'encoding', 'base64',
+        'data', '${demo_audio_mp3_base64}',
+        'stored', json('true'),
         'meta', json_object(
           'model', provider_name || '/' || model,
-          'language', CASE WHEN token_noise % 4 = 0 THEN 'pl' ELSE 'en' END,
-          'prompt', 'Demo meeting note for ' || user_path,
+          'filename', 'prompt-caching-demo.mp3',
+          'language', 'en',
+          'prompt', 'Prompt caching is active.',
           'temperature', round((token_noise % 20) / 100.0, 2)
         )
       )
       WHEN label = 'tts' THEN json_object(
         'model', provider_name || '/' || model,
-        'input', 'Read a concise dashboard summary for ' || user_path || ': tokens are trending up, prompt caching is active, and budgets remain under review.',
+        'input', 'Prompt caching is active.',
         'voice', CASE token_noise % 4 WHEN 0 THEN 'alloy' WHEN 1 THEN 'verse' WHEN 2 THEN 'coral' ELSE 'sage' END,
-        'format', CASE WHEN token_noise % 3 = 0 THEN 'wav' ELSE 'mp3' END,
+        'format', 'mp3',
         'speed', round(0.90 + ((token_noise % 30) / 100.0), 2)
       )
       ELSE json_object('model', provider_name || '/' || model, 'input', 'Generated demo request')
@@ -635,24 +841,25 @@ SELECT
         'usage', json_object('prompt_tokens', input_tokens, 'total_tokens', total_tokens)
       )
       WHEN label = 'stt' THEN json_object(
-        'text', 'Synthetic transcript for ' || user_path || ': review gateway usage, cache hit rates, and budget status.',
-        'duration_seconds', round(18.0 + ((token_noise % 2400) / 100.0), 2),
-        'language', CASE WHEN token_noise % 4 = 0 THEN 'pl' ELSE 'en' END,
+        'text', 'Prompt caching is active.',
+        'duration_seconds', 1.224,
+        'language', 'en',
         'segments', json_array(
-          json_object('id', 0, 'start', 0.00, 'end', 6.20, 'text', 'Review gateway usage and token volume.'),
-          json_object('id', 1, 'start', 6.20, 'end', 12.80, 'text', 'Check prompt caching and semantic cache hits.'),
-          json_object('id', 2, 'start', 12.80, 'end', 18.00, 'text', 'Confirm budgets for the user path.')
+          json_object('id', 0, 'start', 0.00, 'end', 1.224, 'text', 'Prompt caching is active.')
         )
       )
       WHEN label = 'tts' THEN json_object(
         '__audio__', json('true'),
-        'content_type', CASE WHEN token_noise % 3 = 0 THEN 'audio/wav' ELSE 'audio/mpeg' END,
-        'bytes', 32000 + (token_noise % 160000),
-        'stored', json('false'),
+        'content_type', 'audio/mpeg',
+        'bytes', ${demo_audio_mp3_bytes},
+        'encoding', 'base64',
+        'data', '${demo_audio_mp3_base64}',
+        'stored', json('true'),
         'meta', json_object(
           'model', provider_name || '/' || model,
           'voice', CASE token_noise % 4 WHEN 0 THEN 'alloy' WHEN 1 THEN 'verse' WHEN 2 THEN 'coral' ELSE 'sage' END,
-          'format', CASE WHEN token_noise % 3 = 0 THEN 'wav' ELSE 'mp3' END
+          'format', 'mp3',
+          'transcript', 'Prompt caching is active.'
         )
       )
       ELSE json_object('id', '${prefix}-response-' || day_idx || '-' || slot_idx, 'object', label)
@@ -716,6 +923,221 @@ ON CONFLICT(key) DO UPDATE SET
   value = excluded.value,
   updated_at = excluded.updated_at;
 
+DROP TABLE IF EXISTS temp.demo_rate_limits;
+CREATE TEMP TABLE demo_rate_limits(
+  scope TEXT,
+  subject TEXT,
+  period_seconds INTEGER,
+  max_requests INTEGER,
+  max_tokens INTEGER
+);
+INSERT INTO demo_rate_limits VALUES
+  ('user_path', '/agents/team1', 60, 900, 12000000),
+  ('user_path', '/agents/team1', 0, 24, NULL),
+  ('user_path', '/agents/team2', 3600, 8000, 80000000),
+  ('user_path', '/engineering/ai', 86400, 30000, 420000000),
+  ('user_path', '/engineering/ai/bot', 0, 48, NULL),
+  ('user_path', '/sales', 60, 600, 5000000),
+  ('provider', 'openai', 60, 1500, 30000000),
+  ('provider', 'openai', 0, 80, NULL),
+  ('provider', 'groq', 60, 2400, 40000000),
+  ('provider', 'anthropic', 3600, 7500, 120000000),
+  ('provider', 'gemini', 86400, 40000, 600000000),
+  ('provider', 'bailian', 60, 1800, 25000000),
+  ('model', 'openai/gpt-5-nano-2025-08-07', 60, 800, 16000000),
+  ('model', 'anthropic/claude-haiku-4-5-20251001', 3600, 5000, 90000000),
+  ('model', 'qwen-flash', 60, 1200, 18000000);
+
+-- Do not take ownership of a rule the user already created for the same key.
+INSERT OR IGNORE INTO rate_limits (
+  scope, subject, period_seconds, max_requests, max_tokens, source, created_at, updated_at
+)
+SELECT
+  scope,
+  subject,
+  period_seconds,
+  max_requests,
+  max_tokens,
+  '${prefix}',
+  strftime('%s', 'now'),
+  strftime('%s', 'now')
+FROM demo_rate_limits;
+
+-- Disabled examples populate MCP management without making outbound calls.
+DELETE FROM mcp_servers
+WHERE name IN (
+  'demo-' || substr(lower(replace('${prefix}', '.', '-')), 1, 44) || '-docs',
+  'demo-' || substr(lower(replace('${prefix}', '.', '-')), 1, 44) || '-crm'
+);
+INSERT INTO mcp_servers (
+  name, display_name, url, transport, headers, description, enabled,
+  allowed_tools, disallowed_tools, user_paths, tool_timeout_seconds, created_at, updated_at
+)
+VALUES
+  (
+    'demo-' || substr(lower(replace('${prefix}', '.', '-')), 1, 44) || '-docs',
+    'Engineering Docs',
+    'https://mcp.demo.invalid/docs',
+    'http',
+    '{}',
+    'Disabled demo server scoped to engineering documentation workflows.',
+    0,
+    json_array('search_docs', 'read_page'),
+    '[]',
+    json_array('/engineering'),
+    20,
+    strftime('%s', 'now'),
+    strftime('%s', 'now')
+  ),
+  (
+    'demo-' || substr(lower(replace('${prefix}', '.', '-')), 1, 44) || '-crm',
+    'Sales CRM',
+    'https://mcp.demo.invalid/crm',
+    'sse',
+    '{}',
+    'Disabled demo server showing user-path and tool allow-list controls.',
+    0,
+    json_array('search_accounts', 'list_opportunities'),
+    json_array('delete_account'),
+    json_array('/sales'),
+    15,
+    strftime('%s', 'now'),
+    strftime('%s', 'now')
+  );
+
+-- Active keys use fresh random secrets on every seed. Their plaintext values
+-- are printed once below, matching the admin API's issue-once behavior.
+INSERT INTO auth_keys (
+  id, name, description, user_path, labels, redacted_value, secret_hash,
+  enabled, expires_at, deactivated_at, created_at, updated_at
+)
+VALUES
+  (
+    '${prefix}-key-team1',
+    'Agents Team 1',
+    'Demo key for interactive agent and research requests.',
+    '/agents/team1',
+    json_array('env:demo', 'team:agents-1'),
+    '${demo_key_redacted_team1}',
+    '${demo_key_hash_team1}',
+    1, NULL, NULL,
+    strftime('%s', 'now'), strftime('%s', 'now')
+  ),
+  (
+    '${prefix}-key-engineering',
+    'Engineering AI',
+    'Demo key for engineering evaluations and automated jobs.',
+    '/engineering/ai',
+    json_array('env:demo', 'team:engineering', 'priority:high'),
+    '${demo_key_redacted_engineering}',
+    '${demo_key_hash_engineering}',
+    1, NULL, NULL,
+    strftime('%s', 'now'), strftime('%s', 'now')
+  ),
+  (
+    '${prefix}-key-sales',
+    'Sales John',
+    'Demo key for CRM summaries and sales-assistant traffic.',
+    '/sales/john',
+    json_array('env:demo', 'team:sales'),
+    '${demo_key_redacted_sales}',
+    '${demo_key_hash_sales}',
+    1, NULL, NULL,
+    strftime('%s', 'now'), strftime('%s', 'now')
+  );
+
+-- Named virtual models demonstrate aliases plus cost- and latency-oriented
+-- target pools. Existing operator-owned aliases with these names win.
+INSERT OR IGNORE INTO virtual_models (
+  source, targets, strategy, provider_name, model, user_paths,
+  description, enabled, created_at, updated_at
+)
+VALUES
+  (
+    'smart',
+    json_array(
+      json_object('provider', 'openai', 'model', 'gpt-5-nano-2025-08-07', 'weight', 1),
+      json_object('provider', 'anthropic', 'model', 'claude-haiku-4-5-20251001', 'weight', 1),
+      json_object('provider', 'gemini', 'model', 'gemini-2.5-flash-lite', 'weight', 1),
+      json_object('provider', 'bailian', 'model', 'qwen-flash', 'weight', 1)
+    ),
+    'cost', '', '', '[]',
+    '${prefix}: balanced cost-aware model pool',
+    1, strftime('%s', 'now'), strftime('%s', 'now')
+  ),
+  (
+    'normal',
+    json_array(json_object('provider', 'openai', 'model', 'gpt-5-nano-2025-08-07', 'weight', 1)),
+    'round_robin', '', '', '[]',
+    '${prefix}: stable default model alias',
+    1, strftime('%s', 'now'), strftime('%s', 'now')
+  ),
+  (
+    'fast',
+    json_array(
+      json_object('provider', 'groq', 'model', 'llama-3.1-8b-instant', 'weight', 3),
+      json_object('provider', 'gemini', 'model', 'gemini-2.5-flash-lite', 'weight', 2),
+      json_object('provider', 'bailian', 'model', 'qwen-flash', 'weight', 2)
+    ),
+    'round_robin', '', '', '[]',
+    '${prefix}: latency-oriented weighted model pool',
+    1, strftime('%s', 'now'), strftime('%s', 'now')
+  ),
+  (
+    'cheap',
+    json_array(
+      json_object('provider', 'openai', 'model', 'gpt-5-nano-2025-08-07', 'weight', 1),
+      json_object('provider', 'groq', 'model', 'llama-3.1-8b-instant', 'weight', 1),
+      json_object('provider', 'gemini', 'model', 'gemini-2.5-flash-lite', 'weight', 1),
+      json_object('provider', 'bailian', 'model', 'qwen-flash', 'weight', 1)
+    ),
+    'cost', '', '', '[]',
+    '${prefix}: lowest-cost available target',
+    1, strftime('%s', 'now'), strftime('%s', 'now')
+  ),
+  (
+    'quality',
+    json_array(
+      json_object('provider', 'anthropic', 'model', 'claude-haiku-4-5-20251001', 'weight', 2),
+      json_object('provider', 'openai', 'model', 'gpt-5-nano-2025-08-07', 'weight', 1)
+    ),
+    'round_robin', '', '', json_array('/engineering', '/agents'),
+    '${prefix}: quality-oriented pool scoped to engineering and agents',
+    1, strftime('%s', 'now'), strftime('%s', 'now')
+  );
+
+-- Failover order intentionally crosses providers and mirrors the models used
+-- by the generated traffic and aliases.
+INSERT OR IGNORE INTO failover_rules (
+  primary_model, fallback_models, enabled, managed_source, created_at, updated_at
+)
+VALUES
+  (
+    'openai/gpt-5-nano-2025-08-07',
+    json_array('groq/llama-3.1-8b-instant', 'gemini/gemini-2.5-flash-lite', 'bailian/qwen-flash'),
+    1, '${prefix}', strftime('%s', 'now'), strftime('%s', 'now')
+  ),
+  (
+    'groq/llama-3.1-8b-instant',
+    json_array('gemini/gemini-2.5-flash-lite', 'bailian/qwen-flash', 'openai/gpt-5-nano-2025-08-07'),
+    1, '${prefix}', strftime('%s', 'now'), strftime('%s', 'now')
+  ),
+  (
+    'gemini/gemini-2.5-flash-lite',
+    json_array('groq/llama-3.1-8b-instant', 'bailian/qwen-flash', 'openai/gpt-5-nano-2025-08-07'),
+    1, '${prefix}', strftime('%s', 'now'), strftime('%s', 'now')
+  ),
+  (
+    'bailian/qwen-flash',
+    json_array('groq/llama-3.1-8b-instant', 'gemini/gemini-2.5-flash-lite', 'openai/gpt-5-nano-2025-08-07'),
+    1, '${prefix}', strftime('%s', 'now'), strftime('%s', 'now')
+  ),
+  (
+    'anthropic/claude-haiku-4-5-20251001',
+    json_array('openai/gpt-5-nano-2025-08-07', 'gemini/gemini-2.5-flash-lite', 'groq/llama-3.1-8b-instant'),
+    1, '${prefix}', strftime('%s', 'now'), strftime('%s', 'now')
+  );
+
 COMMIT;
 
 SELECT 'seed_prefix', '${prefix}';
@@ -723,6 +1145,12 @@ SELECT 'date_range', min(date(REPLACE(timestamp, 'T', ' '))), max(date(REPLACE(t
 SELECT 'usage_rows', count(*), coalesce(sum(total_tokens), 0) FROM usage WHERE id GLOB '${prefix}-*';
 SELECT 'audit_rows', count(*) FROM audit_logs WHERE id GLOB '${prefix}-*';
 SELECT 'budget_rows', count(*) FROM budgets WHERE source = '${prefix}';
+SELECT 'rate_limit_rows', count(*) FROM rate_limits WHERE source = '${prefix}';
+SELECT 'mcp_server_rows', count(*) FROM mcp_servers
+WHERE name GLOB 'demo-' || substr(lower(replace('${prefix}', '.', '-')), 1, 44) || '-*';
+SELECT 'auth_key_rows', count(*) FROM auth_keys WHERE id GLOB '${prefix}-key-*';
+SELECT 'virtual_model_rows', count(*) FROM virtual_models WHERE description GLOB '${prefix}:*';
+SELECT 'failover_rows', count(*) FROM failover_rules WHERE managed_source = '${prefix}';
 SELECT 'cache_mix', coalesce(cache_type, CASE
   WHEN coalesce(json_extract(raw_data, '$.prompt_cached_tokens'), 0) > 0
     OR coalesce(json_extract(raw_data, '$.cached_tokens'), 0) > 0
@@ -735,9 +1163,19 @@ WHERE id GLOB '${prefix}-*'
 GROUP BY 2
 ORDER BY 2;
 SELECT 'user_paths', count(DISTINCT user_path) FROM usage WHERE id GLOB '${prefix}-*';
+SELECT 'rewritten_requests', count(*), coalesce(sum(rewrite_tokens_saved), 0), round(coalesce(sum(rewrite_cost_saved), 0), 4)
+FROM usage
+WHERE id GLOB '${prefix}-*' AND rewrite_tokens_saved > 0;
 SELECT 'daily_requests_min_max', min(rows), max(rows), round(avg(rows), 1)
 FROM (
   SELECT date(REPLACE(timestamp, 'T', ' ')) AS day, count(*) AS rows
+  FROM usage
+  WHERE id GLOB '${prefix}-*'
+  GROUP BY day
+);
+SELECT 'daily_tokens_min_max', min(tokens), max(tokens), round(avg(tokens), 0)
+FROM (
+  SELECT date(REPLACE(timestamp, 'T', ' ')) AS day, sum(total_tokens) AS tokens
   FROM usage
   WHERE id GLOB '${prefix}-*'
   GROUP BY day
@@ -749,7 +1187,15 @@ cat <<EOF
 Seeded demo data into: $db_path
 Prefix: $prefix
 
+Generated demo API keys (replaced on every seed):
+  /agents/team1    sk_gom_${demo_key_secret_team1}
+  /engineering/ai sk_gom_${demo_key_secret_engineering}
+  /sales/john      sk_gom_${demo_key_secret_sales}
+
 Open the dashboard and use a recent 90-day date range. To replace this generated
 dataset, rerun the script with the same DEMO_SEED_PREFIX. To keep multiple
 datasets side by side, use a different DEMO_SEED_PREFIX.
+
+Rate-limit counters are live process state and start at zero when GoModel starts.
+Use the generated API keys to make requests and populate those counters.
 EOF
