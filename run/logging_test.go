@@ -42,6 +42,36 @@ func TestParseLogLevel(t *testing.T) {
 	}
 }
 
+func TestNewLogHandlerFormatSelection(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		isTTY    bool
+		format   string
+		wantJSON bool
+	}{
+		{name: "unset auto-detects json without tty", isTTY: false, format: "", wantJSON: true},
+		{name: "unset auto-detects text on tty", isTTY: true, format: "", wantJSON: false},
+		{name: "explicit json", isTTY: false, format: "json", wantJSON: true},
+		{name: "explicit json on tty", isTTY: true, format: "json", wantJSON: true},
+		{name: "explicit text without tty", isTTY: false, format: "text", wantJSON: false},
+		{name: "json trimmed and case-insensitive", isTTY: false, format: " JSON ", wantJSON: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler := newLogHandler(io.Discard, tt.isTTY, tt.format, slog.LevelInfo)
+			_, gotJSON := handler.(*slog.JSONHandler)
+			if gotJSON != tt.wantJSON {
+				t.Fatalf("newLogHandler(isTTY=%v, format=%q) json = %v, want %v", tt.isTTY, tt.format, gotJSON, tt.wantJSON)
+			}
+		})
+	}
+}
+
 func TestParseLogLevelInvalid(t *testing.T) {
 	t.Parallel()
 
