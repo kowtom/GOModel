@@ -1,6 +1,7 @@
 package auditlog
 
 import (
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -8,8 +9,29 @@ import (
 
 	"github.com/labstack/echo/v5"
 
-	"gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/core"
 )
+
+func TestApplyAuthenticationRefreshesLabelsFromContext(t *testing.T) {
+	entry := &LogEntry{Data: &LogData{Labels: []string{"from-header"}}}
+	ctx := core.WithRequestLabels(t.Context(), []string{"from-header", "from-key"})
+
+	applyAuthentication(entry, ctx)
+
+	if got, want := strings.Join(entry.Data.Labels, ","), "from-header,from-key"; got != want {
+		t.Fatalf("entry.Data.Labels = %q, want %q", got, want)
+	}
+}
+
+func TestApplyAuthenticationKeepsLabelsWhenContextHasNone(t *testing.T) {
+	entry := &LogEntry{Data: &LogData{Labels: []string{"from-header"}}}
+
+	applyAuthentication(entry, t.Context())
+
+	if got, want := strings.Join(entry.Data.Labels, ","), "from-header"; got != want {
+		t.Fatalf("entry.Data.Labels = %q, want %q", got, want)
+	}
+}
 
 func TestEnrichEntryWithWorkflow_PrefersProviderNameForResolvedModel(t *testing.T) {
 	e := echo.New()
@@ -309,9 +331,7 @@ func (l *captureLiveLogger) PublishLiveEvent(eventType string, entry *LogEntry) 
 	headers := map[string]string(nil)
 	if entry != nil && entry.Data != nil && entry.Data.RequestHeaders != nil {
 		headers = make(map[string]string, len(entry.Data.RequestHeaders))
-		for key, value := range entry.Data.RequestHeaders {
-			headers[key] = value
-		}
+		maps.Copy(headers, entry.Data.RequestHeaders)
 	}
 	var requestBody any
 	if entry != nil && entry.Data != nil {
@@ -322,4 +342,39 @@ func (l *captureLiveLogger) PublishLiveEvent(eventType string, entry *LogEntry) 
 		requestHeaders: headers,
 		requestBody:    requestBody,
 	})
+}
+
+func TestMiddlewarePublishesRemovalWhenHandlerPanics(t *testing.T) {
+	logger := &captureLiveLogger{cfg: Config{Enabled: true}}
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Request-ID", "req-panic")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	handler := Middleware(logger)(func(c *echo.Context) error {
+		panic("handler exploded")
+	})
+
+	// The panic must keep propagating to the outer recover middleware; the
+	// audit middleware only publishes the terminal live event on the way out.
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("panic was swallowed by the audit middleware")
+			}
+		}()
+		_ = handler(c)
+	}()
+
+	if len(logger.events) != 2 {
+		t.Fatalf("live events = %d, want started + removed", len(logger.events))
+	}
+	if logger.events[0].eventType != LiveEventAuditStarted {
+		t.Fatalf("first event = %q, want %q", logger.events[0].eventType, LiveEventAuditStarted)
+	}
+	if logger.events[1].eventType != LiveEventAuditRemoved {
+		t.Fatalf("second event = %q, want %q (terminal event that evicts the live snapshot)", logger.events[1].eventType, LiveEventAuditRemoved)
+	}
 }

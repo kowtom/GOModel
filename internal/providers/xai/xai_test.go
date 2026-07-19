@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"gomodel/internal/core"
-	"gomodel/internal/llmclient"
-	"gomodel/internal/providers"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/llmclient"
+	"github.com/enterpilot/gomodel/internal/providers"
 )
 
 func TestNew(t *testing.T) {
@@ -19,11 +19,11 @@ func TestNew(t *testing.T) {
 	// Use NewWithHTTPClient to get concrete type for internal testing
 	provider := NewWithHTTPClient(apiKey, nil, llmclient.Hooks{})
 
-	if provider.apiKey != apiKey {
-		t.Errorf("apiKey = %q, want %q", provider.apiKey, apiKey)
+	if got := provider.keys.Primary(); got != apiKey {
+		t.Errorf("primary key = %q, want %q", got, apiKey)
 	}
-	if provider.client == nil {
-		t.Error("client should not be nil")
+	if provider.compat == nil {
+		t.Error("compat should not be nil")
 	}
 }
 
@@ -90,11 +90,11 @@ func TestNewWithHTTPClient(t *testing.T) {
 		t.Fatal("provider should not be nil")
 		return
 	}
-	if provider.client == nil {
-		t.Fatal("provider.client should not be nil")
+	if provider.compat == nil {
+		t.Fatal("provider.compat should not be nil")
 	}
-	if provider.apiKey != "test-api-key" {
-		t.Errorf("apiKey = %q, want %q", provider.apiKey, "test-api-key")
+	if got := provider.keys.Primary(); got != "test-api-key" {
+		t.Errorf("primary key = %q, want %q", got, "test-api-key")
 	}
 
 	// Set base URL to our test server
@@ -913,5 +913,103 @@ func TestResponsesWithContext(t *testing.T) {
 	_, err := provider.Responses(ctx, req)
 	if err == nil {
 		t.Error("expected error when context is cancelled, got nil")
+	}
+}
+
+func TestChatCompletion_MapsReasoningToXAIReasoningEffort(t *testing.T) {
+	var gotBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			http.Error(w, "decode error", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id":"chatcmpl-xai",
+			"created":1677652288,
+			"model":"grok-4.5",
+			"choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]
+		}`))
+	}))
+	defer server.Close()
+
+	provider := NewWithHTTPClient("test-api-key", nil, llmclient.Hooks{})
+	provider.SetBaseURL(server.URL)
+
+	_, err := provider.ChatCompletion(context.Background(), &core.ChatRequest{
+		Model:     "grok-4.5",
+		Messages:  []core.Message{{Role: "user", Content: "hi"}},
+		Reasoning: &core.Reasoning{Effort: "medium"},
+	})
+	if err != nil {
+		t.Fatalf("ChatCompletion() error = %v", err)
+	}
+	if gotBody["reasoning"] != nil {
+		t.Fatalf("request body should not include nested reasoning, got %#v", gotBody["reasoning"])
+	}
+	if gotBody["reasoning_effort"] != "medium" {
+		t.Fatalf("reasoning_effort = %#v, want medium", gotBody["reasoning_effort"])
+	}
+}
+
+func TestChatCompletion_OmitsReasoningEffortWhenReasoningAbsent(t *testing.T) {
+	var gotBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			http.Error(w, "decode error", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id":"chatcmpl-xai",
+			"created":1677652288,
+			"model":"grok-4.5",
+			"choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]
+		}`))
+	}))
+	defer server.Close()
+
+	provider := NewWithHTTPClient("test-api-key", nil, llmclient.Hooks{})
+	provider.SetBaseURL(server.URL)
+
+	_, err := provider.ChatCompletion(context.Background(), &core.ChatRequest{
+		Model:    "grok-4.5",
+		Messages: []core.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("ChatCompletion() error = %v", err)
+	}
+	if _, ok := gotBody["reasoning_effort"]; ok {
+		t.Fatalf("reasoning_effort should be absent, got %#v", gotBody["reasoning_effort"])
+	}
+	if _, ok := gotBody["reasoning"]; ok {
+		t.Fatalf("reasoning should be absent, got %#v", gotBody["reasoning"])
+	}
+}
+
+func TestNormalizeReasoningEffort(t *testing.T) {
+	tests := []struct {
+		model  string
+		effort string
+		want   string
+	}{
+		{"grok-4.5", "low", "low"},
+		{"grok-4.5", "medium", "medium"},
+		{"grok-4.5", "high", "high"},
+		{"grok-4.5", "none", "none"},
+		{"grok-4.5", " High ", "high"},
+		{"grok-4.5", "xhigh", "high"},
+		{"grok-4.5", "max", "high"},
+		{"grok-4.20-multi-agent-0309", "xhigh", "xhigh"},
+		{"grok-4.20-multi-agent-0309", "max", "xhigh"},
+		{"grok-4.20-multi-agent-0309", "low", "low"},
+		{"grok-4.5", "custom-level", "custom-level"},
+	}
+	for _, tt := range tests {
+		if got := normalizeReasoningEffort(tt.model, tt.effort); got != tt.want {
+			t.Errorf("normalizeReasoningEffort(%q, %q) = %q, want %q", tt.model, tt.effort, got, tt.want)
+		}
 	}
 }

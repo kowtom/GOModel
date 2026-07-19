@@ -4,6 +4,8 @@ Ordered by lowest effort and lowest risk first.
 
 ## 1. Remove dead `CacheTypeBoth`
 
+Status: done (2026-07-04)
+
 Effort: very low
 Risk: very low
 
@@ -50,6 +52,8 @@ Suggested action:
 - Prefer reader ownership so the behavior stays correct regardless of caller.
 
 ## 4. Remove the legacy `ResponseCacheMiddleware.Middleware()` path
+
+Status: done (2026-07-04)
 
 Effort: medium
 Risk: medium

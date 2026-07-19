@@ -156,16 +156,29 @@ function dashboard() {
     usageMode: "tokens",
     modelUsageView: "chart",
     userPathUsageView: "chart",
+    labelUsageView: "chart",
     modelUsage: [],
     userPathUsage: [],
+    labelUsage: [],
     usageLog: { entries: [], total: 0, limit: 50, offset: 0 },
+    // Filtered summaries for the usage-page stat cards (the overview page
+    // keeps its own unfiltered `summary`): uncached mode for costs, all mode
+    // for the request count shown next to the log.
+    usageSummary: {},
+    usageSummaryAll: {},
+    // Page-level data filters: drive every usage-page widget.
+    usageFilterModel: "",
+    usageFilterProvider: "",
+    usageFilterLabel: "",
+    usageFilterUserPath: "",
+    // Facet dropdown choices, each honoring every filter except its own.
+    usageFacetOptions: { models: [], providers: [], labels: [] },
+    // Log-only view options.
     usageLogSearch: "",
-    usageLogModel: "",
-    usageLogProvider: "",
-    usageLogUserPath: "",
     usageLogHideCached: false,
     usageBarChart: null,
     usageUserPathChart: null,
+    usageLabelChart: null,
 
     // Audit page state
     auditLog: { entries: [], total: 0, limit: 25, offset: 0 },
@@ -175,6 +188,15 @@ function dashboard() {
     auditStream: "",
     auditFetchToken: 0,
     auditExpandedEntries: {},
+    auditStats: {
+      interval: "day",
+      buckets: [],
+      summary: { requests: 0 },
+      provider_latency: [],
+    },
+    auditStatsFetchToken: 0,
+    auditStatusChart: null,
+    auditLatencyChart: null,
 
     // Conversation drawer state
     conversationOpen: false,
@@ -185,6 +207,7 @@ function dashboard() {
     conversationMessages: [],
     conversationRequestToken: 0,
     conversationReturnFocusEl: null,
+    conversationLiveEntryId: "",
     bodyPointerStart: null,
 
     _parseRoute(pathname) {
@@ -206,10 +229,12 @@ function dashboard() {
         "overview",
         "usage",
         "budgets",
+        "rate-limits",
         "models",
         "workflows",
         "audit-logs",
         "guardrails",
+        "mcp-servers",
         "auth-keys",
         "settings",
       ].includes(page)
@@ -244,8 +269,22 @@ function dashboard() {
       ) {
         this.fetchGuardrailsPage();
       }
+      if (
+        page === "mcp-servers" &&
+        typeof this.fetchMcpServersPage === "function"
+      ) {
+        this.fetchMcpServersPage();
+      }
       if (page === "budgets" && typeof this.fetchBudgetsPage === "function") {
         this.fetchBudgetsPage();
+      }
+      // The models page needs rules too: its gauge buttons indicate which
+      // models and providers have direct or inherited rate limits.
+      if (
+        (page === "rate-limits" || page === "models") &&
+        typeof this.fetchRateLimitsPage === "function"
+      ) {
+        this.fetchRateLimitsPage();
       }
       if (page === "settings") {
         if (typeof this.ensureTimezoneOptions === "function") {
@@ -260,6 +299,7 @@ function dashboard() {
       }
       if (page === "overview") {
         this.renderChart();
+        if (typeof this.fetchAuditStats === "function") this.fetchAuditStats();
         if (typeof this.startLiveTokens === "function") this.startLiveTokens();
       }
       if (page === "usage") this.fetchUsagePage();
@@ -370,6 +410,10 @@ function dashboard() {
       this.renderChart();
       this.renderBarChart();
       this.renderUserPathChart();
+      this.renderLabelChart();
+      if (typeof this.renderAuditStatsCharts === "function") {
+        this.renderAuditStatsCharts();
+      }
       if (typeof this.redrawLiveTokensChart === "function") {
         // Force a rebuild so the bars pick up the new theme's colors.
         this.redrawLiveTokensChart();
@@ -433,8 +477,13 @@ function dashboard() {
         this.failoverDraftsOpen ||
         (this.page === "workflows" && this.workflowFormOpen) ||
         (this.page === "guardrails" && this.guardrailFormOpen) ||
+        (this.page === "mcp-servers" &&
+          (this.mcpServerFormOpen || this.mcpCatalogOpen)) ||
         (this.page === "auth-keys" && this.authKeyFormOpen) ||
         (this.page === "budgets" && this.budgetFormOpen) ||
+        ((this.page === "rate-limits" || this.page === "models") &&
+          this.rateLimitFormOpen) ||
+        (this.page === "models" && this.rateLimitInspectorOpen) ||
         this.budgetResetDialogOpen ||
         this.pricingRecalculateDialogOpen ||
         (this.typedConfirmationDialog && this.typedConfirmationDialog.open)
@@ -635,6 +684,19 @@ function dashboard() {
         typeof this.fetchBudgetsPage === "function"
       ) {
         requests.push(this.fetchBudgetsPage());
+      }
+      // The models page needs rules too: its gauge buttons indicate which
+      // models and providers have direct or inherited rate limits.
+      if (
+        (this.page === "rate-limits" || this.page === "models") &&
+        typeof this.fetchRateLimitsPage === "function"
+      ) {
+        requests.push(this.fetchRateLimitsPage());
+      }
+      // Fetched on every page, not just mcp-servers: the overview MCP card
+      // needs the server list to render its connected/total summary.
+      if (typeof this.fetchMcpServersPage === "function") {
+        requests.push(this.fetchMcpServersPage());
       }
       if (
         this.hasCalendarModule &&
@@ -1139,6 +1201,12 @@ function dashboard() {
       "dashboardAuditListModule",
     ),
     resolveModuleFactory(
+      typeof dashboardAuditStatsModule === "function"
+        ? dashboardAuditStatsModule
+        : null,
+      "dashboardAuditStatsModule",
+    ),
+    resolveModuleFactory(
       typeof dashboardLiveLogsModule === "function"
         ? dashboardLiveLogsModule
         : null,
@@ -1179,6 +1247,18 @@ function dashboard() {
         ? dashboardBudgetsModule
         : null,
       "dashboardBudgetsModule",
+    ),
+    resolveModuleFactory(
+      typeof dashboardRateLimitsModule === "function"
+        ? dashboardRateLimitsModule
+        : null,
+      "dashboardRateLimitsModule",
+    ),
+    resolveModuleFactory(
+      typeof dashboardMcpServersModule === "function"
+        ? dashboardMcpServersModule
+        : null,
+      "dashboardMcpServersModule",
     ),
     resolveModuleFactory(
       typeof dashboardTaggingModule === "function"

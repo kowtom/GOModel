@@ -8,15 +8,15 @@ import (
 
 	"github.com/goccy/go-json"
 
-	"gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/core"
 )
 
 // RecalculatePricingParams identifies the stored usage rows whose costs should
-// be recalculated from the latest model pricing metadata.
+// be recalculated from the latest model pricing metadata. Row selection
+// (date range, model, provider, label, user path) rides on the embedded
+// UsageQueryParams, sharing the readers' filter semantics.
 type RecalculatePricingParams struct {
 	UsageQueryParams
-	Model    string
-	Provider string
 }
 
 // RecalculatePricingResult summarizes a pricing recalculation run.
@@ -34,29 +34,32 @@ type PricingRecalculator interface {
 }
 
 type recalculationEntry struct {
-	ID           string
-	Model        string
-	Provider     string
-	ProviderName string
-	Endpoint     string
-	InputTokens  int
-	OutputTokens int
-	RawData      map[string]any
+	ID                 string
+	Model              string
+	Provider           string
+	ProviderName       string
+	Endpoint           string
+	InputTokens        int
+	OutputTokens       int
+	RewriteTokensSaved int
+	RawData            map[string]any
 }
 
 type recalculationUpdate struct {
-	ID         string
-	InputCost  *float64
-	OutputCost *float64
-	TotalCost  *float64
-	CostSource string
-	Caveat     string
-	HasPricing bool
+	ID               string
+	InputCost        *float64
+	OutputCost       *float64
+	TotalCost        *float64
+	RewriteCostSaved *float64
+	CostSource       string
+	Caveat           string
+	HasPricing       bool
 }
 
 func normalizedRecalculatePricingParams(params RecalculatePricingParams) RecalculatePricingParams {
 	params.Model = strings.TrimSpace(params.Model)
 	params.Provider = strings.TrimSpace(params.Provider)
+	params.Label = strings.TrimSpace(params.Label)
 	params.CacheMode = CacheModeAll
 	return params
 }
@@ -70,13 +73,14 @@ func recalculateEntryCosts(entry recalculationEntry, resolver PricingResolver) r
 	effectivePricing := pricingForEndpoint(pricing, entry.Endpoint)
 	result := CalculateUsageCost(entry.InputTokens, entry.OutputTokens, entry.RawData, entry.Provider, effectivePricing)
 	return recalculationUpdate{
-		ID:         entry.ID,
-		InputCost:  result.InputCost,
-		OutputCost: result.OutputCost,
-		TotalCost:  result.TotalCost,
-		CostSource: result.Source,
-		Caveat:     result.Caveat,
-		HasPricing: result.TotalCost != nil || result.InputCost != nil || result.OutputCost != nil,
+		ID:               entry.ID,
+		InputCost:        result.InputCost,
+		OutputCost:       result.OutputCost,
+		TotalCost:        result.TotalCost,
+		RewriteCostSaved: rewriteCostSaved(entry.InputTokens, entry.OutputTokens, entry.RawData, entry.Provider, effectivePricing, entry.RewriteTokensSaved),
+		CostSource:       result.Source,
+		Caveat:           result.Caveat,
+		HasPricing:       result.TotalCost != nil || result.InputCost != nil || result.OutputCost != nil,
 	}
 }
 

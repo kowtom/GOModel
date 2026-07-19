@@ -11,8 +11,8 @@ import (
 
 	"github.com/labstack/echo/v5"
 
-	"gomodel/internal/core"
-	"gomodel/internal/virtualmodels"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/virtualmodels"
 )
 
 // vmTestStore is an in-memory virtualmodels.Store for admin handler tests.
@@ -98,6 +98,10 @@ func (c *vmTestCatalog) add(model, providerType string) {
 func (c *vmTestCatalog) Supports(model string) bool {
 	_, ok := c.models[model]
 	return ok
+}
+
+func (c *vmTestCatalog) ModelAvailable(model string) bool {
+	return c.Supports(model)
 }
 
 func (c *vmTestCatalog) GetProviderType(model string) string {

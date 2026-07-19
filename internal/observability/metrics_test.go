@@ -9,8 +9,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
-	"gomodel/internal/core"
-	"gomodel/internal/llmclient"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/llmclient"
 )
 
 func TestPrometheusHooks(t *testing.T) {
@@ -75,6 +75,49 @@ func TestRequestMetrics_Success(t *testing.T) {
 	value := testutil.ToFloat64(counter)
 	if value != 1 {
 		t.Errorf("Expected counter value 1, got %f", value)
+	}
+}
+
+func TestRequestMetrics_CircuitBreakerStateGauge(t *testing.T) {
+	ResetMetrics()
+
+	hooks := NewPrometheusHooks()
+	ctx := context.Background()
+
+	endRequest := func(circuitState string) {
+		ctx := hooks.OnRequestStart(ctx, llmclient.RequestInfo{Provider: "openai", Endpoint: "/chat/completions"})
+		hooks.OnRequestEnd(ctx, llmclient.ResponseInfo{
+			Provider:     "openai",
+			Model:        "gpt-4",
+			Endpoint:     "/chat/completions",
+			StatusCode:   http.StatusServiceUnavailable,
+			CircuitState: circuitState,
+		})
+	}
+
+	for _, tc := range []struct {
+		state string
+		want  float64
+	}{
+		{state: "closed", want: 0},
+		{state: "half-open", want: 1},
+		{state: "open", want: 2},
+	} {
+		endRequest(tc.state)
+		gauge, err := CircuitBreakerState.GetMetricWithLabelValues("openai")
+		if err != nil {
+			t.Fatalf("Failed to get gauge metric: %v", err)
+		}
+		if value := testutil.ToFloat64(gauge); value != tc.want {
+			t.Errorf("gauge after state %q = %f, want %f", tc.state, value, tc.want)
+		}
+	}
+
+	// A client without a breaker reports no state and must not create a series.
+	ResetMetrics()
+	endRequest("")
+	if count := testutil.CollectAndCount(CircuitBreakerState); count != 0 {
+		t.Errorf("gauge series count = %d after empty state, want 0", count)
 	}
 }
 
@@ -341,41 +384,5 @@ func TestRequestDuration(t *testing.T) {
 	hist := observer.(prometheus.Histogram)
 	if hist == nil {
 		t.Fatal("Expected histogram, got nil")
-	}
-}
-
-func TestHealthCheck(t *testing.T) {
-	// Reset metrics before test
-	ResetMetrics()
-
-	// Health check should succeed
-	err := HealthCheck()
-	if err != nil {
-		t.Errorf("HealthCheck failed: %v", err)
-	}
-}
-
-func TestGetMetrics(t *testing.T) {
-	metrics := GetMetrics()
-
-	if metrics == nil {
-		t.Fatal("GetMetrics returned nil")
-		return
-	}
-
-	if metrics.RequestsTotal == nil {
-		t.Error("RequestsTotal metric is nil")
-	}
-
-	if metrics.RequestDuration == nil {
-		t.Error("RequestDuration metric is nil")
-	}
-
-	if metrics.InFlightRequests == nil {
-		t.Error("InFlightRequests metric is nil")
-	}
-
-	if metrics.ResponseSnapshotStoreFailures == nil {
-		t.Error("ResponseSnapshotStoreFailures metric is nil")
 	}
 }

@@ -26,20 +26,33 @@
   A fast and lightweight AI gateway written in Go, providing unified OpenAI-compatible and Anthropic-compatible APIs for OpenAI, Anthropic, Gemini, DeepSeek, xAI, Groq, OpenRouter, Z.ai, Azure OpenAI, Oracle, Ollama, and more.
 </p>
 
-<a href="docs/dashboard.gif">
-  <img src="docs/dashboard.gif" alt="GoModel AI gateway dashboard showing AI usage analytics, observability panel, token and costs tracking, and estimated cost monitoring" width="100%">
+<a href="docs/2026-07-07_demo.gif">
+  <img src="docs/2026-07-07_demo.gif" alt="GoModel AI gateway dashboard showing AI usage analytics, observability panel, token and costs tracking, and estimated cost monitoring" width="100%">
 </a>
 
-## Quick Start with Docker
+## Quick Start
 
-**Step 1:** Start GoModel container
+**Step 1:** Install and start GoModel
+
+**macOS / Linux**
+
+```bash
+curl -fsSL https://gomodel.enterpilot.io/install.sh | sh
+OPENAI_API_KEY="your-openai-key" gomodel
+```
+
+**Windows (PowerShell)**
+
+```powershell
+irm https://gomodel.enterpilot.io/install.ps1 | iex
+$env:OPENAI_API_KEY = "your-openai-key"; gomodel
+```
+
+**Docker**
 
 ```bash
 docker run --rm -p 8080:8080 \
-  -e LOGGING_ENABLED=true \
-  -e LOGGING_LOG_BODIES=true \
   -e LOG_FORMAT=text \
-  -e LOGGING_LOG_HEADERS=true \
   -e OPENAI_API_KEY="your-openai-key" \
   enterpilot/gomodel
 ```
@@ -64,9 +77,10 @@ curl http://localhost:8080/v1/chat/completions \
 ### Supported LLM Providers
 
 GoModel supports OpenAI, Anthropic, Google Gemini, Vertex AI, DeepSeek, Groq,
-OpenRouter, Z.ai, xAI (Grok), Alibaba Cloud Model Studio (Bailian), MiniMax,
-Xiaomi MiMo, OpenCode Go, Azure OpenAI, Oracle, Ollama, vLLM, Amazon Bedrock,
-and all OpenAI-compatible providers.
+Fireworks AI, Meta (Muse Spark), OpenRouter, Z.ai, xAI (Grok), Alibaba Cloud
+Model Studio (Bailian), Kilo AI, MiniMax, Xiaomi MiMo, OpenCode Go, Azure OpenAI,
+Oracle, Ollama, vLLM, Amazon Bedrock Runtime, Amazon Bedrock Mantle, and all
+OpenAI-compatible providers.
 
 See the [Providers Overview](./docs/providers/overview.mdx) for the full
 per-provider feature matrix (chat, `/responses`, embeddings, files, batches,
@@ -156,7 +170,3 @@ See the [Roadmap](./docs/about/roadmap.mdx) for commercial features and the publ
 ## Community
 
 Join our [Discord](https://discord.gg/gaEB9BQSPH) to connect with other GoModel users.
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=enterpilot/gomodel&type=date&legend=top-left)](https://www.star-history.com/#enterpilot/gomodel&type=date&legend=top-left)

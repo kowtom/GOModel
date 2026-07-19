@@ -3,12 +3,13 @@ package providers
 
 import (
 	"fmt"
+	"maps"
 	"sort"
 	"sync"
 
-	"gomodel/config"
-	"gomodel/internal/core"
-	"gomodel/internal/llmclient"
+	"github.com/enterpilot/gomodel/config"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/llmclient"
 )
 
 // ProviderOptions bundles runtime settings passed from the factory to provider constructors.
@@ -16,6 +17,23 @@ type ProviderOptions struct {
 	Hooks      llmclient.Hooks
 	Models     []string
 	Resilience config.ResilienceConfig
+	// Keys carries every API key configured for this provider instance. It is
+	// nil for keyless providers and for constructors invoked outside the
+	// factory; use the Keyring method rather than reading it directly.
+	Keys *Keyring
+}
+
+// Keyring returns the key source a provider should authenticate with, falling
+// back to a single-key ring over apiKey when the factory supplied none. Every
+// provider constructor takes an API key and ProviderOptions, so this one call
+// gives a provider rotation support without changing its signature, and keeps
+// constructors invoked outside the factory (tests, the NewWithHTTPClient
+// variants) working unchanged.
+func (o ProviderOptions) Keyring(apiKey string) *Keyring {
+	if o.Keys != nil {
+		return o.Keys
+	}
+	return NewKeyring(apiKey)
 }
 
 // ProviderConstructor is the constructor signature for providers.
@@ -64,6 +82,14 @@ func (f *ProviderFactory) SetHooks(hooks llmclient.Hooks) {
 	f.hooks = hooks
 }
 
+// AddHooks composes additional hooks with any already configured, affecting
+// providers created after the call.
+func (f *ProviderFactory) AddHooks(hooks llmclient.Hooks) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hooks = llmclient.JoinHooks(f.hooks, hooks)
+}
+
 // Add adds a provider constructor to the factory.
 // Panics if reg.Type is empty or reg.New is nil — both are programming errors
 // caught at startup, not runtime conditions.
@@ -96,10 +122,13 @@ func (f *ProviderFactory) Create(cfg ProviderConfig) (core.Provider, error) {
 		return nil, fmt.Errorf("unknown provider type: %s", cfg.Type)
 	}
 
+	// One Keyring per provider instance: every client this provider builds
+	// shares the rotation, so keys are used evenly across all its endpoints.
 	opts := ProviderOptions{
 		Hooks:      hooks,
 		Models:     cfg.Models,
 		Resilience: cfg.Resilience,
+		Keys:       NewKeyring(cfg.APIKeys...),
 	}
 
 	return builder(cfg, opts), nil
@@ -111,9 +140,7 @@ func (f *ProviderFactory) discoveryConfigsSnapshot() map[string]DiscoveryConfig 
 	defer f.mu.RUnlock()
 
 	snapshot := make(map[string]DiscoveryConfig, len(f.discoveryConfigs))
-	for providerType, cfg := range f.discoveryConfigs {
-		snapshot[providerType] = cfg
-	}
+	maps.Copy(snapshot, f.discoveryConfigs)
 	return snapshot
 }
 

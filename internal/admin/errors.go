@@ -8,13 +8,14 @@ import (
 
 	"github.com/labstack/echo/v5"
 
-	"gomodel/internal/authkeys"
-	"gomodel/internal/budget"
-	"gomodel/internal/core"
-	"gomodel/internal/guardrails"
-	"gomodel/internal/pricingoverrides"
-	"gomodel/internal/virtualmodels"
-	"gomodel/internal/workflows"
+	"github.com/enterpilot/gomodel/internal/authkeys"
+	"github.com/enterpilot/gomodel/internal/budget"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/guardrails"
+	"github.com/enterpilot/gomodel/internal/pricingoverrides"
+	"github.com/enterpilot/gomodel/internal/ratelimit"
+	"github.com/enterpilot/gomodel/internal/virtualmodels"
+	"github.com/enterpilot/gomodel/internal/workflows"
 )
 
 func budgetServiceError(message string, err error) error {
@@ -22,6 +23,13 @@ func budgetServiceError(message string, err error) error {
 		return core.NewNotFoundError("budget not found").WithCode("budget_not_found")
 	}
 	return core.NewProviderError("budgets", http.StatusServiceUnavailable, message, err)
+}
+
+func rateLimitServiceError(message string, err error) error {
+	if errors.Is(err, ratelimit.ErrNotFound) {
+		return core.NewNotFoundError("rate limit rule not found").WithCode("rate_limit_not_found")
+	}
+	return core.NewProviderError("ratelimits", http.StatusServiceUnavailable, message, err)
 }
 
 func featureUnavailableError(message string) error {

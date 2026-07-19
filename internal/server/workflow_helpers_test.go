@@ -9,8 +9,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"gomodel/internal/auditlog"
-	"gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/auditlog"
+	"github.com/enterpilot/gomodel/internal/core"
 )
 
 func TestEnsureTranslatedRequestWorkflow_CompletesPartialWorkflowFromDecodedSelector(t *testing.T) {
@@ -35,7 +35,7 @@ func TestEnsureTranslatedRequestWorkflow_CompletesPartialWorkflowFromDecodedSele
 	model := "gpt-4o-mini"
 	providerHint := ""
 
-	workflow, err := ensureTranslatedRequestWorkflow(c, provider, nil, nil, &model, &providerHint)
+	workflow, err := ensureTranslatedRequestWorkflowWithAuthorizer(c, provider, nil, nil, nil, &model, &providerHint)
 	require.NoError(t, err)
 	require.NotNil(t, workflow)
 

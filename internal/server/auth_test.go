@@ -12,16 +12,17 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"gomodel/internal/auditlog"
-	"gomodel/internal/authkeys"
-	"gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/auditlog"
+	"github.com/enterpilot/gomodel/internal/authkeys"
+	"github.com/enterpilot/gomodel/internal/core"
 )
 
 type mockAuthenticator struct {
-	enabled   bool
-	tokenToID map[string]string
-	tokenPath map[string]string
-	err       error
+	enabled     bool
+	tokenToID   map[string]string
+	tokenPath   map[string]string
+	tokenLabels map[string][]string
+	err         error
 }
 
 func (m mockAuthenticator) Enabled() bool {
@@ -39,6 +40,7 @@ func (m mockAuthenticator) Authenticate(_ context.Context, token string) (authke
 	return authkeys.AuthenticationResult{
 		ID:       id,
 		UserPath: m.tokenPath[token],
+		Labels:   m.tokenLabels[token],
 	}, nil
 }
 
@@ -47,6 +49,7 @@ func TestAuthMiddleware(t *testing.T) {
 		name           string
 		masterKey      string
 		authHeader     string
+		apiKeyHeader   string
 		expectedStatus int
 		expectedBody   string
 	}{
@@ -65,11 +68,33 @@ func TestAuthMiddleware(t *testing.T) {
 			expectedBody:   "ok",
 		},
 		{
-			name:           "missing authorization header - denies request",
+			name:           "missing credentials - denies request",
 			masterKey:      "secret-key-123",
 			authHeader:     "",
 			expectedStatus: http.StatusUnauthorized,
-			expectedBody:   `{"error":{"message":"missing authorization header","type":"authentication_error","param":null,"code":null}}`,
+			expectedBody:   `{"error":{"message":"missing credentials: send 'Authorization: Bearer <token>' or 'x-api-key: <token>'","type":"authentication_error","param":null,"code":null}}`,
+		},
+		{
+			name:           "valid x-api-key - allows request",
+			masterKey:      "secret-key-123",
+			apiKeyHeader:   "secret-key-123",
+			expectedStatus: http.StatusOK,
+			expectedBody:   "ok",
+		},
+		{
+			name:           "invalid x-api-key - denies request",
+			masterKey:      "secret-key-123",
+			apiKeyHeader:   "wrong-key",
+			expectedStatus: http.StatusUnauthorized,
+			expectedBody:   `{"error":{"message":"invalid master key","type":"authentication_error","param":null,"code":null}}`,
+		},
+		{
+			name:           "authorization header takes precedence over x-api-key",
+			masterKey:      "secret-key-123",
+			authHeader:     "Bearer wrong-key",
+			apiKeyHeader:   "secret-key-123",
+			expectedStatus: http.StatusUnauthorized,
+			expectedBody:   `{"error":{"message":"invalid master key","type":"authentication_error","param":null,"code":null}}`,
 		},
 		{
 			name:           "invalid authorization format - denies request",
@@ -117,6 +142,9 @@ func TestAuthMiddleware(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "/", nil)
 			if tt.authHeader != "" {
 				req.Header.Set("Authorization", tt.authHeader)
+			}
+			if tt.apiKeyHeader != "" {
+				req.Header.Set("x-api-key", tt.apiKeyHeader)
 			}
 			rec := httptest.NewRecorder()
 			c := e.NewContext(req, rec)
@@ -215,6 +243,56 @@ func TestAuthMiddlewareWithAuthenticator_ManagedKeyEnrichesContextAndAudit(t *te
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "ok", rec.Body.String())
+}
+
+func TestAuthMiddlewareWithAuthenticator_ManagedKeyLabelsMergeWithHeaderLabels(t *testing.T) {
+	e := echo.New()
+	testHandler := func(c *echo.Context) error {
+		got := core.RequestLabelsFromContext(c.Request().Context())
+		assert.Equal(t, []string{"from-header", "team-a", "batch"}, got)
+		return c.String(http.StatusOK, "ok")
+	}
+
+	handler := AuthMiddlewareWithAuthenticator("", mockAuthenticator{
+		enabled:     true,
+		tokenToID:   map[string]string{"sk_gom_token": "key-123"},
+		tokenLabels: map[string][]string{"sk_gom_token": {"team-a", "batch", "from-header"}},
+	}, nil)(testHandler)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer sk_gom_token")
+	// Simulate the tagging middleware having already extracted header labels.
+	req = req.WithContext(core.WithRequestLabels(req.Context(), []string{"from-header"}))
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	err := handler(c)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestAuthMiddlewareWithAuthenticator_ManagedKeyWithoutLabelsKeepsHeaderLabels(t *testing.T) {
+	e := echo.New()
+	testHandler := func(c *echo.Context) error {
+		got := core.RequestLabelsFromContext(c.Request().Context())
+		assert.Equal(t, []string{"from-header"}, got)
+		return c.String(http.StatusOK, "ok")
+	}
+
+	handler := AuthMiddlewareWithAuthenticator("", mockAuthenticator{
+		enabled:   true,
+		tokenToID: map[string]string{"sk_gom_token": "key-123"},
+	}, nil)(testHandler)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer sk_gom_token")
+	req = req.WithContext(core.WithRequestLabels(req.Context(), []string{"from-header"}))
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	err := handler(c)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
 func TestAuthMiddlewareWithAuthenticator_ManagedKeyUserPathOverridesHeader(t *testing.T) {

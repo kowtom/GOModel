@@ -15,10 +15,10 @@ import (
 
 	"github.com/labstack/echo/v5"
 
-	"gomodel/internal/auditlog"
-	"gomodel/internal/core"
-	"gomodel/internal/providers"
-	"gomodel/internal/usage"
+	"github.com/enterpilot/gomodel/internal/auditlog"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/providers"
+	"github.com/enterpilot/gomodel/internal/usage"
 )
 
 // mockUsageReader implements usage.UsageReader for testing.
@@ -27,6 +27,7 @@ type mockUsageReader struct {
 	daily                []usage.DailyUsage
 	modelUsage           []usage.ModelUsage
 	userPathUsage        []usage.UserPathUsage
+	labelUsage           []usage.LabelUsage
 	usageLog             *usage.UsageLogResult
 	usageByRequestID     map[string][]usage.UsageLogEntry
 	cacheOverview        *usage.CacheOverview
@@ -41,6 +42,7 @@ type mockUsageReader struct {
 	dailyErr             error
 	modelUsageErr        error
 	userPathUsageErr     error
+	labelUsageErr        error
 	usageLogErr          error
 	usageByRequestErr    error
 	cacheErr             error
@@ -57,6 +59,9 @@ type mockAuditReader struct {
 	conversationErr     error
 	lastConversationID  string
 	lastConversationLim int
+	statsResult         *auditlog.RequestStats
+	statsErr            error
+	lastStatsParams     auditlog.RequestStatsParams
 }
 
 type mockRuntimeRefresher struct {
@@ -96,6 +101,13 @@ func (m *mockUsageReader) GetUsageByUserPath(_ context.Context, _ usage.UsageQue
 		return nil, m.userPathUsageErr
 	}
 	return m.userPathUsage, nil
+}
+
+func (m *mockUsageReader) GetUsageByLabel(_ context.Context, _ usage.UsageQueryParams) ([]usage.LabelUsage, error) {
+	if m.labelUsageErr != nil {
+		return nil, m.labelUsageErr
+	}
+	return m.labelUsage, nil
 }
 
 func (m *mockUsageReader) GetUsageLog(_ context.Context, params usage.UsageLogParams) (*usage.UsageLogResult, error) {
@@ -145,6 +157,14 @@ func (m *mockAuditReader) GetLogByID(_ context.Context, _ string) (*auditlog.Log
 		return nil, m.logByIDErr
 	}
 	return m.logByID, nil
+}
+
+func (m *mockAuditReader) GetRequestStats(_ context.Context, params auditlog.RequestStatsParams) (*auditlog.RequestStats, error) {
+	m.lastStatsParams = params
+	if m.statsErr != nil {
+		return nil, m.statsErr
+	}
+	return m.statsResult, nil
 }
 
 func (m *mockAuditReader) GetConversation(_ context.Context, logID string, limit int) (*auditlog.ConversationResult, error) {
@@ -673,6 +693,72 @@ func TestUsageByUserPath_Error(t *testing.T) {
 	}
 }
 
+// --- UsageByLabel handler tests ---
+
+func TestUsageByLabel_NilReader(t *testing.T) {
+	h := NewHandler(nil, nil)
+	c, rec := newHandlerContext("/admin/usage/labels")
+
+	if err := h.UsageByLabel(c); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+	if rec.Body.String() != "[]\n" {
+		t.Errorf("expected empty JSON array, got: %q", rec.Body.String())
+	}
+}
+
+func TestUsageByLabel_Success(t *testing.T) {
+	cost := 1.25
+	reader := &mockUsageReader{
+		labelUsage: []usage.LabelUsage{
+			{Label: "team-alpha", Requests: 4, InputTokens: 100, OutputTokens: 50, TotalTokens: 150, TotalCost: &cost},
+		},
+	}
+	h := NewHandler(reader, nil)
+	c, rec := newHandlerContext("/admin/usage/labels?days=30")
+
+	if err := h.UsageByLabel(c); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+	var labels []usage.LabelUsage
+	if err := json.Unmarshal(rec.Body.Bytes(), &labels); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	if len(labels) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(labels))
+	}
+	if labels[0].Label != "team-alpha" {
+		t.Errorf("expected label team-alpha, got %s", labels[0].Label)
+	}
+	if labels[0].Requests != 4 {
+		t.Errorf("expected requests 4, got %d", labels[0].Requests)
+	}
+	if labels[0].TotalCost == nil || *labels[0].TotalCost != 1.25 {
+		t.Errorf("expected total_cost 1.25, got %v", labels[0].TotalCost)
+	}
+}
+
+func TestUsageByLabel_Error(t *testing.T) {
+	reader := &mockUsageReader{
+		labelUsageErr: errors.New("db failure"),
+	}
+	h := NewHandler(reader, nil)
+	c, rec := newHandlerContext("/admin/usage/labels")
+
+	if err := h.UsageByLabel(c); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", rec.Code)
+	}
+}
+
 // --- UsageLog handler tests ---
 
 func TestUsageLog_NilReader(t *testing.T) {
@@ -821,7 +907,7 @@ func TestUsageLog_WithFilters(t *testing.T) {
 		},
 	}
 	h := NewHandler(reader, nil)
-	c, rec := newHandlerContext("/admin/usage/log?model=gpt-4&provider=openai&user_path=/team&search=test&limit=10&offset=5")
+	c, rec := newHandlerContext("/admin/usage/log?model=gpt-4&provider=openai&user_path=/team&label=team-alpha&search=test&limit=10&offset=5")
 
 	if err := h.UsageLog(c); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -831,6 +917,9 @@ func TestUsageLog_WithFilters(t *testing.T) {
 	}
 	if reader.lastUsageLog.UserPath != "/team" {
 		t.Errorf("expected user_path /team, got %q", reader.lastUsageLog.UserPath)
+	}
+	if reader.lastUsageLog.Label != "team-alpha" {
+		t.Errorf("expected label team-alpha, got %q", reader.lastUsageLog.Label)
 	}
 }
 
@@ -2102,7 +2191,7 @@ func TestBuildProviderStatusItem_ClassifyAndDisplayFallbacks(t *testing.T) {
 				Type:                    "openai",
 				Registered:              true,
 				DiscoveredModelCount:    7,
-				LastModelFetchSuccessAt: timePtr(time.Now()),
+				LastModelFetchSuccessAt: new(time.Now()),
 			},
 			wantStatus:  "healthy",
 			wantLabel:   "Healthy",
@@ -2129,7 +2218,7 @@ func TestBuildProviderStatusItem_ClassifyAndDisplayFallbacks(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			item := buildProviderStatusItem(tc.key, tc.cfg, tc.runtime)
+			item := buildProviderStatusItem(tc.key, tc.cfg, tc.runtime, nil)
 
 			if item.Name != tc.key {
 				t.Errorf("Name = %q, want %q", item.Name, tc.key)
@@ -2159,14 +2248,13 @@ func TestBuildProviderStatusItem_ClassifyAndDisplayFallbacks(t *testing.T) {
 	}
 }
 
-func timePtr(t time.Time) *time.Time { return &t }
-
 func TestDashboardConfig_ReturnsAllowlistedRuntimeFlags(t *testing.T) {
 	h := NewHandler(nil, nil, WithDashboardRuntimeConfig(DashboardConfigResponse{
 		FailoverEnabled:      "on",
 		LoggingEnabled:       "on",
 		UsageEnabled:         "off",
 		BudgetsEnabled:       "on",
+		RateLimitsEnabled:    "off",
 		GuardrailsEnabled:    "on",
 		CacheEnabled:         "on",
 		RedisURL:             "on",
@@ -2198,6 +2286,9 @@ func TestDashboardConfig_ReturnsAllowlistedRuntimeFlags(t *testing.T) {
 	}
 	if got := body.BudgetsEnabled; got != "on" {
 		t.Fatalf("BUDGETS_ENABLED = %q, want on", got)
+	}
+	if got := body.RateLimitsEnabled; got != "off" {
+		t.Fatalf("RATE_LIMITS_ENABLED = %q, want off", got)
 	}
 	if got := body.GuardrailsEnabled; got != "on" {
 		t.Fatalf("GUARDRAILS_ENABLED = %q, want on", got)

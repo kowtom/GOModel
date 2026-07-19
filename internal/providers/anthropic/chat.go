@@ -7,8 +7,8 @@ import (
 
 	"github.com/goccy/go-json"
 
-	"gomodel/internal/core"
-	"gomodel/internal/llmclient"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/llmclient"
 )
 
 // convertFromAnthropicResponse converts Anthropic response to core.ChatResponse
@@ -59,6 +59,7 @@ func convertFromAnthropicResponse(resp *anthropicResponse) *core.ChatResponse {
 				Index:        0,
 				Message:      msg,
 				FinishReason: finishReason,
+				StopSequence: resp.StopSequence,
 			},
 		},
 		Usage: usage,

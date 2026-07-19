@@ -6,20 +6,9 @@ import (
 
 	"github.com/labstack/echo/v5"
 
-	"gomodel/internal/core"
-	"gomodel/internal/gateway"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/gateway"
 )
-
-func ensureTranslatedRequestWorkflow(
-	c *echo.Context,
-	provider core.RoutableProvider,
-	resolver RequestModelResolver,
-	policyResolver RequestWorkflowPolicyResolver,
-	model,
-	providerHint *string,
-) (*core.Workflow, error) {
-	return ensureTranslatedRequestWorkflowWithAuthorizer(c, provider, resolver, nil, policyResolver, model, providerHint)
-}
 
 func ensureTranslatedRequestWorkflowWithAuthorizer(
 	c *echo.Context,

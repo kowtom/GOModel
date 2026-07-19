@@ -3,10 +3,8 @@ package modeldata
 import (
 	"testing"
 
-	"gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/core"
 )
-
-func intPtr(v int) *int { return &v }
 
 func TestMergeMetadata_BothNil(t *testing.T) {
 	if got := MergeMetadata(nil, nil); got != nil {
@@ -15,7 +13,7 @@ func TestMergeMetadata_BothNil(t *testing.T) {
 }
 
 func TestMergeMetadata_NilOverride(t *testing.T) {
-	base := &core.ModelMetadata{DisplayName: "Base", ContextWindow: intPtr(1024)}
+	base := &core.ModelMetadata{DisplayName: "Base", ContextWindow: new(1024)}
 	got := MergeMetadata(base, nil)
 	if got == nil || got.DisplayName != "Base" || *got.ContextWindow != 1024 {
 		t.Errorf("got %+v", got)
@@ -40,15 +38,15 @@ func TestMergeMetadata_OverrideWinsPerField(t *testing.T) {
 	base := &core.ModelMetadata{
 		DisplayName:     "Base",
 		Description:     "base desc",
-		ContextWindow:   intPtr(1024),
-		MaxOutputTokens: intPtr(256),
+		ContextWindow:   new(1024),
+		MaxOutputTokens: new(256),
 		Modes:           []string{"chat"},
 		Capabilities:    map[string]bool{"tools": false, "vision": true},
 		Pricing:         &core.ModelPricing{Currency: "USD"},
 	}
 	override := &core.ModelMetadata{
 		DisplayName:   "Overridden",
-		ContextWindow: intPtr(131072),
+		ContextWindow: new(131072),
 		Capabilities:  map[string]bool{"tools": true},
 	}
 	got := MergeMetadata(base, override)

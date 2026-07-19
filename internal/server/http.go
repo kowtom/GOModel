@@ -11,23 +11,25 @@ import (
 	"strings"
 	"time"
 
-	"gomodel/config"
+	"github.com/enterpilot/gomodel/config"
+	"github.com/enterpilot/gomodel/ext"
 
 	"github.com/labstack/echo/v5"
 	"github.com/labstack/echo/v5/middleware"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"gomodel/internal/admin"
-	"gomodel/internal/admin/dashboard"
-	"gomodel/internal/auditlog"
-	batchstore "gomodel/internal/batch"
-	"gomodel/internal/conversationstore"
-	"gomodel/internal/core"
-	"gomodel/internal/filestore"
-	"gomodel/internal/responsecache"
-	"gomodel/internal/responsestore"
-	"gomodel/internal/tagging"
-	"gomodel/internal/usage"
+	"github.com/enterpilot/gomodel/internal/admin"
+	"github.com/enterpilot/gomodel/internal/admin/dashboard"
+	"github.com/enterpilot/gomodel/internal/auditlog"
+	batchstore "github.com/enterpilot/gomodel/internal/batch"
+	"github.com/enterpilot/gomodel/internal/conversationstore"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/filestore"
+	"github.com/enterpilot/gomodel/internal/mcpgateway"
+	"github.com/enterpilot/gomodel/internal/responsecache"
+	"github.com/enterpilot/gomodel/internal/responsestore"
+	"github.com/enterpilot/gomodel/internal/tagging"
+	"github.com/enterpilot/gomodel/internal/usage"
 )
 
 // Server wraps the Echo server
@@ -57,6 +59,8 @@ type Config struct {
 	AuditLogger                     auditlog.LoggerInterface               // Optional: Audit logger for request/response logging
 	UsageLogger                     usage.LoggerInterface                  // Optional: Usage logger for token tracking
 	BudgetChecker                   BudgetChecker                          // Optional: per-user-path budget checker
+	RateLimiter                     RateLimiter                            // Optional: per-user-path rate limiter
+	UsageSummarizer                 UsageSummarizer                        // Optional: usage aggregates for the self-service GET /v1/usage endpoint
 	PricingResolver                 usage.PricingResolver                  // Optional: Resolves pricing for cost calculation
 	ModelResolver                   RequestModelResolver                   // Optional: explicit model resolver used during workflow resolution
 	ModelAuthorizer                 RequestModelAuthorizer                 // Optional: request-scoped concrete model access controller
@@ -74,6 +78,8 @@ type Config struct {
 	LogOnlyModelInteractions        bool                                   // Only log AI model endpoints (default: true)
 	DisablePassthroughRoutes        bool                                   // Disable /p/{provider}/{endpoint} route registration
 	RealtimeEnabled                 bool                                   // Enable realtime websocket route /v1/realtime and passthrough upgrades
+	MCPEnabled                      bool                                   // Enable the MCP gateway routes /mcp and /mcp/{server}
+	MCPGateway                      *mcpgateway.Service                    // MCP gateway service (nil if disabled or not wired)
 	EnabledPassthroughProviders     []string                               // Provider types enabled on /p/{provider}/... passthrough routes
 	AllowPassthroughV1Alias         *bool                                  // Allow /p/{provider}/v1/... aliases; nil defaults to true
 	UserPathHeader                  string                                 // Header carrying the request user path (default: X-GoModel-User-Path)
@@ -87,6 +93,10 @@ type Config struct {
 	IPExtractor                     echo.IPExtractor                       // Optional: trusted client IP extraction strategy for proxied deployments
 	StorageProbe                    ReadinessProbe                         // Optional: primary storage connectivity check; failure makes /health/ready report not_ready (503)
 	CacheProbe                      ReadinessProbe                         // Optional: Redis cache connectivity check; failure makes /health/ready report degraded (200, non-blocking)
+	RequestRewriters                []ext.RequestRewriter                  // Optional: raw-body rewriters invoked on inference ingress (post-auth, pre-workflow-resolution)
+	ExtraMiddleware                 []echo.MiddlewareFunc                  // Optional: extension middleware registered after audit, before gateway auth
+	ExtraRoutes                     []func(*echo.Echo)                     // Optional: extension route registration callbacks invoked after core routes
+	ExtraAuthSkipPaths              []string                               // Optional: extension paths appended to the auth skip list ("/*" suffix matches a prefix)
 	Tagging                         *tagging.Service                       // Optional: request labelling based on configured tagging headers
 }
 
@@ -100,7 +110,16 @@ type ReadinessProbe interface {
 
 // New creates a new HTTP server
 func New(provider core.RoutableProvider, cfg *Config) *Server {
-	e := echo.New()
+	// The router-level NotFoundHandler fires only when no route matches the
+	// path at all, so unknown routes get a dialect-aware canonical error
+	// envelope while echo's 405 handling for known paths stays intact (a
+	// wildcard RouteNotFound route would shadow it and turn 405s into 404s).
+	e := echo.NewWithConfig(echo.Config{
+		Router: echo.NewRouter(echo.RouterConfig{
+			AllowOverwritingRoute: true,
+			NotFoundHandler:       handleRouteNotFound,
+		}),
+	})
 	e.Logger = slog.Default()
 	basePath := configuredBasePath(cfg)
 	if basePath != "/" {
@@ -142,6 +161,10 @@ func New(provider core.RoutableProvider, cfg *Config) *Server {
 	handler := newHandlerWithAuthorizer(provider, auditLogger, usageLogger, pricingResolver, modelResolver, modelAuthorizer, workflowPolicyResolver, failoverResolver, translatedRequestPatcher)
 	handler.budgetChecker = budgetChecker
 	if cfg != nil {
+		handler.rateLimiter = cfg.RateLimiter
+		handler.usageSummarizer = cfg.UsageSummarizer
+	}
+	if cfg != nil {
 		handler.batchRequestPreparer = cfg.BatchRequestPreparer
 		handler.exposedModelLister = cfg.ExposedModelLister
 		handler.keepOnlyAliasesAtModelsEndpoint = cfg.KeepOnlyAliasesAtModelsEndpoint
@@ -156,6 +179,10 @@ func New(provider core.RoutableProvider, cfg *Config) *Server {
 	// Mirror the route-registration default below: a nil config enables realtime
 	// so the documented default and the registered route stay consistent.
 	handler.realtimeEnabled = cfg == nil || cfg.RealtimeEnabled
+	if cfg != nil {
+		handler.mcpEnabled = cfg.MCPEnabled
+		handler.mcpGateway = cfg.MCPGateway
+	}
 	if cfg != nil && !passthroughV1PrefixNormalizationEnabled(cfg) {
 		handler.normalizePassthroughV1Prefix = false
 	}
@@ -207,6 +234,9 @@ func New(provider core.RoutableProvider, cfg *Config) *Server {
 	}
 	if cfg != nil && cfg.PprofEnabled {
 		authSkipPaths = append(authSkipPaths, "/debug/pprof", "/debug/pprof/*")
+	}
+	if cfg != nil {
+		authSkipPaths = append(authSkipPaths, cfg.ExtraAuthSkipPaths...)
 	}
 
 	// Global middleware stack (order matters)
@@ -270,6 +300,7 @@ func New(provider core.RoutableProvider, cfg *Config) *Server {
 
 	// Ingress capture (before auth/audit/model validation so they can consume shared raw request state)
 	userPathHeaderName := configuredUserPathHeader(cfg)
+	handler.userPathHeaderName = userPathHeaderName
 	e.Use(RequestSnapshotCapture(userPathHeaderName))
 
 	// Request labelling from configured tagging headers (after snapshot capture so
@@ -291,9 +322,25 @@ func New(provider core.RoutableProvider, cfg *Config) *Server {
 		e.Use(auditlog.Middleware(cfg.AuditLogger))
 	}
 
+	// Extension middleware runs after audit capture and before gateway auth so
+	// extensions (e.g. SSO sessions) can normalize credentials for the auth check.
+	if cfg != nil {
+		for _, m := range cfg.ExtraMiddleware {
+			e.Use(m)
+		}
+	}
+
 	// Authentication (skips public paths)
 	if cfg != nil && (cfg.MasterKey != "" || cfg.Authenticator != nil) {
 		e.Use(AuthMiddlewareWithAuthenticator(cfg.MasterKey, cfg.Authenticator, authSkipPaths, userPathHeaderName))
+	}
+
+	// Request rewriters run post-auth (rewriters only see authenticated
+	// traffic) and pre-workflow-resolution (body rewrites, including "model",
+	// affect routing, failover, guardrails, budgets, and caching). Not
+	// registered when no rewriters exist, so the default build pays nothing.
+	if cfg != nil && len(cfg.RequestRewriters) > 0 {
+		e.Use(RequestRewriteMiddleware(cfg.RequestRewriters, auditLogger))
 	}
 
 	// Workflow resolution resolves the request-scoped workflow after auth so
@@ -332,9 +379,16 @@ func New(provider core.RoutableProvider, cfg *Config) *Server {
 		e.OPTIONS("/p/:provider/*", handler.ProviderPassthrough)
 	}
 	e.GET("/v1/models", handler.ListModels)
+	e.GET("/v1/usage", handler.UsageStatus)
 	e.POST("/v1/chat/completions", handler.ChatCompletion)
 	e.POST("/v1/messages", handler.Messages)
 	e.POST("/v1/messages/count_tokens", handler.CountMessageTokens)
+	e.POST("/v1/messages/batches", handler.MessagesBatches)
+	e.GET("/v1/messages/batches", handler.ListMessagesBatches)
+	e.GET("/v1/messages/batches/:id", handler.GetMessagesBatch)
+	e.POST("/v1/messages/batches/:id/cancel", handler.CancelMessagesBatch)
+	e.DELETE("/v1/messages/batches/:id", handler.DeleteMessagesBatch)
+	e.GET("/v1/messages/batches/:id/results", handler.MessagesBatchResults)
 	e.POST("/v1/responses/input_tokens", handler.ResponseInputTokens)
 	e.POST("/v1/responses/compact", handler.CompactResponse)
 	e.GET("/v1/responses/:id/input_items", handler.ListResponseInputItems)
@@ -351,6 +405,16 @@ func New(provider core.RoutableProvider, cfg *Config) *Server {
 	e.POST("/v1/audio/transcriptions", handler.AudioTranscriptions)
 	if cfg == nil || cfg.RealtimeEnabled {
 		e.GET("/v1/realtime", handler.Realtime)
+		e.POST("/v1/realtime/calls", handler.RealtimeCalls)
+		e.POST("/v1/realtime/client_secrets", handler.RealtimeClientSecrets)
+	}
+	if cfg != nil && cfg.MCPEnabled && cfg.MCPGateway != nil {
+		e.POST("/mcp", handler.MCP)
+		e.GET("/mcp", handler.MCP)
+		e.DELETE("/mcp", handler.MCP)
+		e.POST("/mcp/:server", handler.MCPServer)
+		e.GET("/mcp/:server", handler.MCPServer)
+		e.DELETE("/mcp/:server", handler.MCPServer)
 	}
 	e.POST("/v1/files", handler.CreateFile)
 	e.GET("/v1/files", handler.ListFiles)
@@ -382,6 +446,13 @@ func New(provider core.RoutableProvider, cfg *Config) *Server {
 		e.GET("/admin/dashboard", cfg.DashboardHandler.Index)
 		e.GET("/admin/dashboard/*", cfg.DashboardHandler.Index)
 		e.GET("/admin/static/*", cfg.DashboardHandler.Static)
+	}
+
+	// Extension routes register after all core routes.
+	if cfg != nil {
+		for _, register := range cfg.ExtraRoutes {
+			register(e)
+		}
 	}
 
 	var rcm *responsecache.ResponseCacheMiddleware

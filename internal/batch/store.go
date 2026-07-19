@@ -11,7 +11,7 @@ import (
 
 	"github.com/goccy/go-json"
 
-	"gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/core"
 )
 
 // ErrNotFound indicates a requested batch was not found.
@@ -44,6 +44,7 @@ type Store interface {
 	Get(ctx context.Context, id string) (*StoredBatch, error)
 	List(ctx context.Context, limit int, after string) ([]*StoredBatch, error)
 	Update(ctx context.Context, batch *StoredBatch) error
+	Delete(ctx context.Context, id string) error
 	Close() error
 }
 

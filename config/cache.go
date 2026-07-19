@@ -17,7 +17,11 @@ type CacheConfig struct {
 // ModelCacheConfig holds cache configuration for model registry.
 // Exactly one of Local or Redis must be non-nil.
 type ModelCacheConfig struct {
-	RefreshInterval int               `yaml:"refresh_interval" env:"CACHE_REFRESH_INTERVAL"`
+	RefreshInterval int `yaml:"refresh_interval" env:"CACHE_REFRESH_INTERVAL"`
+	// RecheckInterval is how often (seconds) providers whose latest refresh
+	// failed are re-checked, so outage recovery is detected without waiting
+	// for the next full refresh. Zero or negative disables the fast recheck.
+	RecheckInterval int               `yaml:"recheck_interval" env:"PROVIDER_RECHECK_INTERVAL"`
 	ModelList       ModelListConfig   `yaml:"model_list"`
 	Local           *LocalCacheConfig `yaml:"local"`
 	Redis           *RedisModelConfig `yaml:"redis"`
@@ -250,14 +254,12 @@ func mergeSemanticResponseDefaults(sem *SemanticCacheConfig) {
 		sem.SimilarityThreshold = 0.92
 	}
 	if sem.TTL == nil {
-		sem.TTL = intPtr(3600)
+		sem.TTL = new(3600)
 	}
 	if sem.MaxConversationMessages == nil {
-		sem.MaxConversationMessages = intPtr(3)
+		sem.MaxConversationMessages = new(3)
 	}
 }
-
-func intPtr(v int) *int { return &v }
 
 func applyResponseSimpleEnv(resp *ResponseCacheConfig) error {
 	v, ok := os.LookupEnv("RESPONSE_CACHE_SIMPLE_ENABLED")

@@ -11,7 +11,7 @@ import (
 
 	"github.com/goccy/go-json"
 
-	"gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/core"
 )
 
 // LogStore defines the interface for audit log storage backends.
@@ -47,6 +47,7 @@ const (
 const (
 	LiveEventAuditStarted   = "audit.started"
 	LiveEventAuditUpdated   = "audit.updated"
+	LiveEventAuditStream    = "audit.stream"
 	LiveEventAuditCompleted = "audit.completed"
 	LiveEventAuditFailed    = "audit.failed"
 	LiveEventAuditFlushed   = "audit.flushed"
@@ -65,6 +66,13 @@ type LiveEventPublisher interface {
 // previews before the entry is persisted.
 type LiveEventEmitter interface {
 	PublishLiveEvent(eventType string, entry *LogEntry)
+}
+
+// LiveSubscriberReporter is optionally implemented by live publishers (and
+// emitters) that can report whether any dashboard subscriber is currently
+// connected. Publishers that cannot tell are treated as always subscribed.
+type LiveSubscriberReporter interface {
+	HasLiveSubscribers() bool
 }
 
 // LogEntry represents a single audit log entry.
@@ -128,6 +136,12 @@ type LogData struct {
 	// stores split this into audit_log_attempts; Mongo stores it embedded.
 	Attempts []AttemptSnapshot `json:"attempts,omitempty" bson:"attempts,omitempty"`
 
+	// RequestRevisions captures the ingress request-rewrite chain: one entry
+	// per registered rewriter that changed the body, in application order.
+	// RequestBody always remains the original client request; the last
+	// revision is what was forwarded downstream.
+	RequestRevisions []RequestRevisionSnapshot `json:"request_revisions,omitempty" bson:"request_revisions,omitempty"`
+
 	// Request parameters
 	Temperature *float64 `json:"temperature,omitempty" bson:"temperature,omitempty"`
 	MaxTokens   *int     `json:"max_tokens,omitempty" bson:"max_tokens,omitempty"`
@@ -171,6 +185,29 @@ type FailoverSnapshot struct {
 	TargetModel string `json:"target_model,omitempty" bson:"target_model,omitempty"`
 }
 
+// RequestRevisionSnapshot records one ingress rewrite of the request body,
+// so operators can trace how a request changed on its way to the provider.
+type RequestRevisionSnapshot struct {
+	Seq         int    `json:"seq" bson:"seq"`
+	Rewriter    string `json:"rewriter" bson:"rewriter"`
+	BytesBefore int    `json:"bytes_before" bson:"bytes_before"`
+	BytesAfter  int    `json:"bytes_after" bson:"bytes_after"`
+
+	// TokensSaved is the rewriter-reported estimate of prompt tokens this
+	// revision saved (e.g. token compression); zero when the rewriter does
+	// not report savings.
+	TokensSaved int `json:"tokens_saved,omitempty" bson:"tokens_saved,omitempty"`
+
+	// Body is the request body after this revision (parsed JSON, or a string
+	// when not valid JSON). Populated only when body logging is enabled and
+	// the body is within the capture limit.
+	Body any `json:"body,omitempty" bson:"body,omitempty"`
+
+	// Detail is an optional rewriter-provided structured summary of what
+	// changed (for example a compression block report).
+	Detail any `json:"detail,omitempty" bson:"detail,omitempty"`
+}
+
 // AttemptSnapshot stores one external provider attempt made for a logical
 // request. It intentionally stores structured errors, not raw upstream bodies.
 type AttemptSnapshot struct {
@@ -184,7 +221,7 @@ type AttemptSnapshot struct {
 	ErrorType    string    `json:"error_type,omitempty" bson:"error_type,omitempty"`
 	ErrorCode    string    `json:"error_code,omitempty" bson:"error_code,omitempty"`
 	ErrorMessage string    `json:"error_message,omitempty" bson:"error_message,omitempty"`
-	StartedAt    time.Time `json:"started_at,omitempty" bson:"started_at,omitempty"`
+	StartedAt    time.Time `json:"started_at" bson:"started_at,omitempty"`
 	DurationNs   int64     `json:"duration_ns,omitempty" bson:"duration_ns,omitempty"`
 
 	// ResponseBody and ResponseHeaders capture the raw upstream error response
@@ -344,18 +381,4 @@ type Config struct {
 	// OnlyModelInteractions limits logging to AI model endpoints only
 	// When true, only /v1/chat/completions, /v1/responses, /v1/embeddings, /v1/files, and /v1/batches are logged
 	OnlyModelInteractions bool
-}
-
-// DefaultConfig returns a Config with sensible defaults
-func DefaultConfig() Config {
-	return Config{
-		Enabled:               false,
-		LogBodies:             false,
-		LogAudioBodies:        false,
-		LogHeaders:            false,
-		BufferSize:            1000,
-		FlushInterval:         5 * time.Second,
-		RetentionDays:         30,
-		OnlyModelInteractions: true,
-	}
 }

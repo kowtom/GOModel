@@ -9,11 +9,11 @@ import (
 	"os"
 	"strings"
 
-	"gomodel/internal/core"
-	"gomodel/internal/llmclient"
-	"gomodel/internal/providers"
-	"gomodel/internal/providers/anthropic"
-	"gomodel/internal/providers/openai"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/llmclient"
+	"github.com/enterpilot/gomodel/internal/providers"
+	"github.com/enterpilot/gomodel/internal/providers/anthropic"
+	"github.com/enterpilot/gomodel/internal/providers/openai"
 )
 
 // defaultBaseURL is the OpenCode Zen "Go" endpoint. Its /chat/completions and
@@ -76,7 +76,9 @@ func New(cfg providers.ProviderConfig, opts providers.ProviderOptions) core.Prov
 		ProviderName: "opencode_go",
 		BaseURL:      baseURL,
 	})
-	messages := anthropic.New(providers.ProviderConfig{APIKey: cfg.APIKey, BaseURL: baseURL}, opts)
+	// opts carries the shared keyring, so the /messages client rotates in step
+	// with the chat client above rather than pinning the primary key.
+	messages := anthropic.New(providers.ProviderConfig{APIKey: cfg.APIKey, APIKeys: cfg.APIKeys, BaseURL: baseURL}, opts)
 	return &Provider{
 		ChatCompatible: chat,
 		messages:       messages,

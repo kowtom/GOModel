@@ -14,15 +14,15 @@ import (
 
 	"github.com/labstack/echo/v5"
 
-	"gomodel/internal/auditlog"
-	"gomodel/internal/conversationstore"
-	"gomodel/internal/core"
-	"gomodel/internal/gateway"
-	"gomodel/internal/observability"
-	"gomodel/internal/responsecache"
-	"gomodel/internal/responsestore"
-	"gomodel/internal/streaming"
-	"gomodel/internal/usage"
+	"github.com/enterpilot/gomodel/internal/auditlog"
+	"github.com/enterpilot/gomodel/internal/conversationstore"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/gateway"
+	"github.com/enterpilot/gomodel/internal/observability"
+	"github.com/enterpilot/gomodel/internal/responsecache"
+	"github.com/enterpilot/gomodel/internal/responsestore"
+	"github.com/enterpilot/gomodel/internal/streaming"
+	"github.com/enterpilot/gomodel/internal/usage"
 )
 
 // translatedInferenceService adapts Echo requests to the transport-independent
@@ -37,6 +37,7 @@ type translatedInferenceService struct {
 	logger                   auditlog.LoggerInterface
 	usageLogger              usage.LoggerInterface
 	budgetChecker            BudgetChecker
+	rateLimiter              RateLimiter
 	pricingResolver          usage.PricingResolver
 	responseCache            *responsecache.ResponseCacheMiddleware
 	guardrailsHash           string
@@ -62,7 +63,7 @@ func (s *translatedInferenceService) inference() *gateway.InferenceOrchestrator 
 }
 
 func (s *translatedInferenceService) newInferenceOrchestrator() *gateway.InferenceOrchestrator {
-	return gateway.NewInferenceOrchestrator(gateway.InferenceConfig{
+	cfg := gateway.InferenceConfig{
 		Provider:                 s.provider,
 		ModelResolver:            s.modelResolver,
 		ModelAuthorizer:          s.modelAuthorizer,
@@ -72,7 +73,14 @@ func (s *translatedInferenceService) newInferenceOrchestrator() *gateway.Inferen
 		UsageLogger:              s.usageLogger,
 		PricingResolver:          s.pricingResolver,
 		GuardrailsHash:           s.guardrailsHash,
-	})
+	}
+	// Guarded assignment keeps the gate nil when rate limits are off (a nil
+	// RateLimiter assigned unconditionally would arrive as a typed non-nil
+	// RouteGate).
+	if s.rateLimiter != nil {
+		cfg.RouteGate = s.rateLimiter
+	}
+	return gateway.NewInferenceOrchestrator(cfg)
 }
 
 func (s *translatedInferenceService) ChatCompletion(c *echo.Context) error {
@@ -88,9 +96,13 @@ func (s *translatedInferenceService) dispatchChatCompletion(c *echo.Context, req
 	ctx := c.Request().Context()
 	requestID := requestIDFromContextOrHeader(c.Request())
 
-	if err := enforceBudget(c, s.budgetChecker); err != nil {
+	adm, err := enforceAdmission(c, s.rateLimiter, s.budgetChecker,
+		rateLimitRouteFromWorkflow(workflow).withFailovers(len(s.inference().FailoverSelectors(workflow))))
+	if err != nil {
 		return handleError(c, err)
 	}
+	defer adm.release()
+	ctx = adm.dispatchContext(ctx)
 
 	if req.Stream {
 		if len(s.inference().FailoverSelectors(workflow)) == 0 {
@@ -252,9 +264,13 @@ func (s *translatedInferenceService) dispatchResponses(c *echo.Context, req *cor
 	ctx := c.Request().Context()
 	requestID := requestIDFromContextOrHeader(c.Request())
 
-	if err := enforceBudget(c, s.budgetChecker); err != nil {
+	adm, err := enforceAdmission(c, s.rateLimiter, s.budgetChecker,
+		rateLimitRouteFromWorkflow(workflow).withFailovers(len(s.inference().FailoverSelectors(workflow))))
+	if err != nil {
 		return handleError(c, err)
 	}
+	defer adm.release()
+	ctx = adm.dispatchContext(ctx)
 
 	if req.Stream {
 		result, err := s.inference().StreamResponses(ctx, workflow, req)
@@ -437,9 +453,11 @@ func (s *translatedInferenceService) Embeddings(c *echo.Context) error {
 	}
 	attachPreparedWorkflow(c, prepared.Context, prepared.Workflow)
 
-	if err := enforceBudget(c, s.budgetChecker); err != nil {
+	adm, err := enforceAdmission(c, s.rateLimiter, s.budgetChecker, rateLimitRouteFromWorkflow(prepared.Workflow))
+	if err != nil {
 		return handleError(c, err)
 	}
+	defer adm.release()
 
 	requestID := requestIDFromContextOrHeader(c.Request())
 	result, err := s.inference().ExecuteEmbeddings(c.Request().Context(), prepared.Workflow, prepared.Request, requestID, "/v1/embeddings")
@@ -537,6 +555,7 @@ func (s *translatedInferenceService) handleStreamingReadCloser(
 		if usageObserver != nil {
 			usageObserver.SetProviderName(providerName)
 			usageObserver.SetLabels(core.RequestLabelsFromContext(c.Request().Context()))
+			usageObserver.SetRewriteTokensSaved(core.RewriteTokensSavedFromContext(c.Request().Context()))
 			observers = append(observers, usageObserver)
 		}
 	}
@@ -562,19 +581,6 @@ func (s *translatedInferenceService) handleStreamingReadCloser(
 		recordStreamingError(streamEntry, model, provider, c.Request().URL.Path, requestID, c.Request().Context(), err)
 	}
 	return nil
-}
-
-func (s *translatedInferenceService) handleStreamingResponse(
-	c *echo.Context,
-	workflow *core.Workflow,
-	model, provider, providerName string,
-	streamFn func() (io.ReadCloser, error),
-) error {
-	stream, err := streamFn()
-	if err != nil {
-		return handleStreamingDispatchError(c, err)
-	}
-	return s.handleStreamingReadCloser(c, workflow, model, provider, providerName, "", stream, nil)
 }
 
 // handleStreamingDispatchError records audit context for a streaming request

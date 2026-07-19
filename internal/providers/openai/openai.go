@@ -8,9 +8,9 @@ import (
 
 	"github.com/goccy/go-json"
 
-	"gomodel/internal/core"
-	"gomodel/internal/llmclient"
-	"gomodel/internal/providers"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/llmclient"
+	"github.com/enterpilot/gomodel/internal/providers"
 )
 
 // Registration provides factory registration for the OpenAI provider.
@@ -28,12 +28,11 @@ const (
 )
 
 // Provider implements the core.Provider interface for OpenAI.
-// apiKey is retained so the provider can inject auth on the realtime websocket
-// dial target (see realtime.go); the realtime base URL is read live from the
-// embedded CompatibleProvider so SetBaseURL overrides are honored.
+// Credentials and the realtime base URL are both read live from the embedded
+// CompatibleProvider, so SetBaseURL overrides and key rotation are honored on
+// the realtime websocket dial target too (see realtime.go).
 type Provider struct {
 	*CompatibleProvider
-	apiKey string
 }
 
 // New creates a new OpenAI provider.
@@ -45,7 +44,6 @@ func New(cfg providers.ProviderConfig, opts providers.ProviderOptions) core.Prov
 			BaseURL:      baseURL,
 			SetHeaders:   setHeaders,
 		}),
-		apiKey: cfg.APIKey,
 	}
 }
 
@@ -58,33 +56,19 @@ func NewWithHTTPClient(apiKey string, httpClient *http.Client, hooks llmclient.H
 			BaseURL:      defaultBaseURL,
 			SetHeaders:   setHeaders,
 		}),
-		apiKey: apiKey,
 	}
 }
 
 // setHeaders sets the required headers for OpenAI API requests.
 // OpenAI requires the request ID to be ASCII-only and at most 512 bytes,
-// otherwise it returns 400, so forwarding is gated by isValidClientRequestID.
+// otherwise it returns 400, so forwarding is gated by
+// providers.IsValidClientRequestID.
 func setHeaders(req *http.Request, apiKey string) {
 	providers.SetAuthHeaders(req, apiKey, providers.AuthHeaderConfig{
 		AuthScheme:        "Bearer ",
 		RequestIDHeader:   "X-Client-Request-Id",
-		ValidateRequestID: isValidClientRequestID,
+		ValidateRequestID: providers.IsValidClientRequestID,
 	})
-}
-
-// isValidClientRequestID checks if the request ID is valid for OpenAI's X-Client-Request-Id header.
-// OpenAI requires: ASCII characters only, max 512 characters.
-func isValidClientRequestID(id string) bool {
-	if len(id) > 512 {
-		return false
-	}
-	for i := 0; i < len(id); i++ {
-		if id[i] > 127 {
-			return false
-		}
-	}
-	return true
 }
 
 // isOSeriesModel reports whether the model is an OpenAI o-series model

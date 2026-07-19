@@ -11,9 +11,9 @@ import (
 
 	"github.com/labstack/echo/v5"
 
-	"gomodel/internal/core"
-	"gomodel/internal/guardrails"
-	"gomodel/internal/workflows"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/guardrails"
+	"github.com/enterpilot/gomodel/internal/workflows"
 )
 
 type guardrailTestStore struct {
@@ -353,7 +353,7 @@ func TestDeleteGuardrailRejectsActiveWorkflowReference(t *testing.T) {
 			},
 		},
 	}
-	planService, err := workflows.NewService(planStore, workflows.NewCompiler(guardrailService))
+	planService, err := workflows.NewService(planStore, workflows.NewCompilerWithFeatureCaps(guardrailService, core.DefaultWorkflowFeatures()))
 	if err != nil {
 		t.Fatalf("workflows.NewService() error = %v", err)
 	}
@@ -408,7 +408,7 @@ func TestDeleteGuardrailIgnoresDisabledWorkflowGuardrailRefs(t *testing.T) {
 			},
 		},
 	}
-	planService, err := workflows.NewService(planStore, workflows.NewCompiler(guardrailService))
+	planService, err := workflows.NewService(planStore, workflows.NewCompilerWithFeatureCaps(guardrailService, core.DefaultWorkflowFeatures()))
 	if err != nil {
 		t.Fatalf("workflows.NewService() error = %v", err)
 	}

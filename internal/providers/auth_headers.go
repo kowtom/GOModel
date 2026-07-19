@@ -3,7 +3,7 @@ package providers
 import (
 	"net/http"
 
-	"gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/core"
 )
 
 // AuthHeaderConfig describes how a provider populates outbound request headers.
@@ -24,6 +24,21 @@ type AuthHeaderConfig struct {
 	// OptionalAPIKey skips the auth header entirely when the API key is empty,
 	// for providers that allow unauthenticated access (e.g. local Ollama/vLLM).
 	OptionalAPIKey bool
+}
+
+// IsValidClientRequestID reports whether id may be forwarded as a client
+// request-ID header value: upstreams that accept one (OpenAI, OpenRouter,
+// Azure) require printable ASCII and reject oversized values with a 400.
+func IsValidClientRequestID(id string) bool {
+	if len(id) > 512 {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		if id[i] < 0x20 || id[i] > 0x7E {
+			return false
+		}
+	}
+	return true
 }
 
 // SetAuthHeaders applies cfg to req for the given API key. It is safe to use

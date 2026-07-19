@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"gomodel/tests/integration/dbassert"
+	"github.com/enterpilot/gomodel/tests/integration/dbassert"
 )
 
 func TestUsage_CapturesAllFields_PostgreSQL(t *testing.T) {
@@ -139,7 +139,7 @@ func TestUsage_MultipleRequests_PostgreSQL(t *testing.T) {
 	dbassert.ClearUsage(t, fixture.PgPool)
 
 	requestIDs := make([]string, 5)
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		requestIDs[i] = uuid.New().String()
 		payload := newChatRequest("gpt-4", "Hello!")
 		resp := sendChatRequestWithHeaders(t, fixture.ServerURL, payload, map[string]string{
@@ -174,7 +174,7 @@ func TestUsage_TokenSummary_PostgreSQL(t *testing.T) {
 	dbassert.ClearUsage(t, fixture.PgPool)
 
 	// Make several requests
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		payload := newChatRequest("gpt-4", "Hello!")
 		resp := sendChatRequest(t, fixture.ServerURL, payload)
 		require.Equal(t, 200, resp.StatusCode)

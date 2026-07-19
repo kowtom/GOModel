@@ -10,13 +10,13 @@ import (
 	"testing"
 	"time"
 
-	"gomodel/internal/admin"
-	"gomodel/internal/admin/dashboard"
-	"gomodel/internal/core"
-	"gomodel/internal/providers"
-	"gomodel/internal/usage"
+	"github.com/enterpilot/gomodel/internal/admin"
+	"github.com/enterpilot/gomodel/internal/admin/dashboard"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/providers"
+	"github.com/enterpilot/gomodel/internal/usage"
 
-	_ "gomodel/cmd/gomodel/docs"
+	_ "github.com/enterpilot/gomodel/cmd/gomodel/docs"
 
 	"github.com/labstack/echo/v5"
 )
@@ -127,7 +127,7 @@ func TestStartWithListener(t *testing.T) {
 	client := &http.Client{Timeout: 200 * time.Millisecond}
 	url := "http://" + listener.Addr().String() + "/health"
 	var lastErr error
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		resp, err := client.Get(url)
 		if err == nil {
 			_ = resp.Body.Close()
@@ -580,7 +580,7 @@ func TestServer_ManagedAuthKeyUserPathOverridesHeaderBeforeWorkflowResolution(t 
 
 func newDashboardHandler(t *testing.T) *dashboard.Handler {
 	t.Helper()
-	h, err := dashboard.New()
+	h, err := dashboard.NewWithBasePath("/")
 	if err != nil {
 		t.Fatalf("failed to create dashboard handler: %v", err)
 	}

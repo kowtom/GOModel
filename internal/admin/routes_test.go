@@ -39,11 +39,13 @@ func TestRegisterRoutes_RegistersExpectedPaths(t *testing.T) {
 		"GET /admin/usage/daily",
 		"GET /admin/usage/models",
 		"GET /admin/usage/user-paths",
+		"GET /admin/usage/labels",
 		"GET /admin/usage/log",
 		"GET /admin/usage/throughput",
 		"POST /admin/usage/recalculate-pricing",
 
 		"GET /admin/audit/log",
+		"GET /admin/audit/stats",
 		"GET /admin/audit/detail",
 		"GET /admin/audit/conversation",
 
@@ -58,6 +60,12 @@ func TestRegisterRoutes_RegistersExpectedPaths(t *testing.T) {
 		"POST /admin/budgets/reset-one",
 		"POST /admin/budgets/reset",
 
+		"GET /admin/rate-limits",
+		"PUT /admin/rate-limits",
+		"DELETE /admin/rate-limits",
+		"POST /admin/rate-limits/reset-one",
+		"POST /admin/rate-limits/reset",
+
 		"GET /admin/tagging/settings",
 		"PUT /admin/tagging/settings",
 
@@ -67,6 +75,12 @@ func TestRegisterRoutes_RegistersExpectedPaths(t *testing.T) {
 		"GET /admin/virtual-models",
 		"PUT /admin/virtual-models",
 		"DELETE /admin/virtual-models",
+
+		"GET /admin/mcp-servers",
+		"PUT /admin/mcp-servers",
+		"DELETE /admin/mcp-servers/:name",
+		"POST /admin/mcp-servers/:name/reconnect",
+		"GET /admin/mcp-servers/:name/catalog",
 
 		"GET /admin/failover",
 		"PUT /admin/failover",
@@ -80,6 +94,7 @@ func TestRegisterRoutes_RegistersExpectedPaths(t *testing.T) {
 
 		"GET /admin/auth-keys",
 		"POST /admin/auth-keys",
+		"PUT /admin/auth-keys/:id/labels",
 		"POST /admin/auth-keys/:id/deactivate",
 
 		"GET /admin/guardrails/types",

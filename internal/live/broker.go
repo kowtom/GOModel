@@ -9,13 +9,14 @@ import (
 
 	"github.com/goccy/go-json"
 
-	"gomodel/internal/auditlog"
-	"gomodel/internal/usage"
+	"github.com/enterpilot/gomodel/internal/auditlog"
+	"github.com/enterpilot/gomodel/internal/usage"
 )
 
 const (
 	EventAuditStarted   = auditlog.LiveEventAuditStarted
 	EventAuditUpdated   = auditlog.LiveEventAuditUpdated
+	EventAuditStream    = auditlog.LiveEventAuditStream
 	EventAuditCompleted = auditlog.LiveEventAuditCompleted
 	EventAuditFailed    = auditlog.LiveEventAuditFailed
 	EventAuditFlushed   = auditlog.LiveEventAuditFlushed
@@ -31,6 +32,12 @@ const (
 	defaultBufferSize       = 10000
 	defaultReplayLimit      = 1000
 	defaultSubscriberBuffer = 256
+
+	// maxRetainedEventBytes caps the payload size of events kept in the replay
+	// ring and active snapshots. Retained copies already exclude request and
+	// response bodies; this bounds the leftovers (headers, error messages) so
+	// the ring's worst case stays capacity × this cap regardless of traffic.
+	maxRetainedEventBytes = 64 * 1024
 )
 
 // Config controls the in-process live event broker.
@@ -105,6 +112,12 @@ func NewBroker(cfg Config) *Broker {
 	if cfg.Heartbeat <= 0 {
 		cfg.Heartbeat = 15 * time.Second
 	}
+	// Events older than the replay window can never be served — replayAfterLocked
+	// resets any cursor that far behind — so ring slots beyond ReplayLimit+1 only
+	// retain memory without ever being read.
+	if cfg.BufferSize > cfg.ReplayLimit+1 {
+		cfg.BufferSize = cfg.ReplayLimit + 1
+	}
 	return &Broker{
 		enabled:          cfg.Enabled,
 		bufferSize:       cfg.BufferSize,
@@ -125,6 +138,18 @@ func (b *Broker) Enabled() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return !b.closed
+}
+
+// HasLiveSubscribers reports whether any dashboard stream is currently
+// connected. Publishers of high-frequency preview events use it to skip
+// building payloads nobody would receive.
+func (b *Broker) HasLiveSubscribers() bool {
+	if b == nil || !b.enabled {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return !b.closed && len(b.subscribers) > 0
 }
 
 // Heartbeat returns the stream heartbeat interval.
@@ -263,16 +288,28 @@ func (b *Broker) publish(eventType, entryID, requestID string, timestamp time.Ti
 	if b == nil || !b.enabled {
 		return
 	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	b.publishEvent(eventType, entryID, requestID, timestamp, data, nil)
+}
+
+// publishEvent buffers the retained payload for replay and fans the event out
+// to subscribers. fanoutData, when non-nil, replaces the retained payload on
+// the copy sent to live subscribers — used to deliver request/response bodies
+// to connected dashboards without retaining them in the replay ring or active
+// snapshots, which outlive the request.
+func (b *Broker) publishEvent(eventType, entryID, requestID string, timestamp time.Time, retainedData, fanoutData json.RawMessage) {
+	if b == nil || !b.enabled {
+		return
+	}
 	eventType = strings.TrimSpace(eventType)
 	if eventType == "" {
 		return
 	}
 	if timestamp.IsZero() {
 		timestamp = time.Now().UTC()
-	}
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return
 	}
 
 	b.mu.Lock()
@@ -290,7 +327,7 @@ func (b *Broker) publish(eventType, entryID, requestID string, timestamp time.Ti
 		Type:      eventType,
 		RequestID: strings.TrimSpace(requestID),
 		Timestamp: timestamp.UTC(),
-		Data:      data,
+		Data:      retainedData,
 	}
 	b.updateActiveSnapshotsLocked(&event, entryID)
 	if len(b.events) < b.bufferSize {
@@ -303,9 +340,13 @@ func (b *Broker) publish(eventType, entryID, requestID string, timestamp time.Ti
 		}
 	}
 
+	fanout := event
+	if fanoutData != nil {
+		fanout.Data = fanoutData
+	}
 	for id, ch := range b.subscribers {
 		select {
-		case ch <- event:
+		case ch <- fanout:
 		default:
 			delete(b.subscribers, id)
 			close(ch)
@@ -438,13 +479,80 @@ func mergeEventData(base, patch json.RawMessage) json.RawMessage {
 	return merged
 }
 
-// PublishAuditEvent publishes a compact audit log preview event.
+// PublishAuditEvent publishes a compact audit log preview event. Connected
+// subscribers receive the full preview, including any captured bodies; the
+// copy retained for replay strips bodies (flagging them as captured so the
+// dashboard hydrates them from the persisted entry) and is size-capped, so
+// broker retention stays bounded regardless of request size.
 func (b *Broker) PublishAuditEvent(eventType string, entry *auditlog.LogEntry) {
-	if entry == nil {
+	if b == nil || !b.enabled || entry == nil {
 		return
 	}
 	payload := auditPreviewFromEntry(eventType, entry)
-	b.publish(eventType, entry.ID, entry.RequestID, entry.Timestamp, payload)
+	fanoutData, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	retainedData, reduced := fanoutData, false
+	if stripped, changed := stripAuditPreviewBodies(payload); changed {
+		retainedData, err = json.Marshal(stripped)
+		if err != nil {
+			return
+		}
+		reduced = true
+	}
+	if len(retainedData) > maxRetainedEventBytes {
+		retainedData, err = json.Marshal(compactAuditPreviewForRetention(payload))
+		if err != nil {
+			return
+		}
+		reduced = true
+	}
+	if !reduced {
+		// Nothing was stripped: retain and fan out the same payload.
+		b.publishEvent(eventType, entry.ID, entry.RequestID, entry.Timestamp, fanoutData, nil)
+		return
+	}
+	b.publishEvent(eventType, entry.ID, entry.RequestID, entry.Timestamp, retainedData, fanoutData)
+}
+
+// stripAuditPreviewBodies returns a preview copy without request/response
+// bodies, marking each stripped body as captured. A partial (mid-stream)
+// response body is not marked captured — it is not in the persisted entry —
+// and the partial flag itself is dropped so it cannot go stale in merged
+// active snapshots. Reports whether anything was stripped.
+func stripAuditPreviewBodies(preview auditPreview) (auditPreview, bool) {
+	if preview.Data == nil || (preview.Data.RequestBody == nil && preview.Data.ResponseBody == nil) {
+		return preview, false
+	}
+	data := *preview.Data
+	if data.RequestBody != nil {
+		data.RequestBody = nil
+		data.RequestBodyCaptured = true
+	}
+	if data.ResponseBody != nil {
+		data.ResponseBody = nil
+		data.ResponseBodyCaptured = !data.ResponseBodyPartial
+	}
+	data.ResponseBodyPartial = false
+	preview.Data = &data
+	return preview, true
+}
+
+// compactAuditPreviewForRetention reduces a preview to its top-level fields
+// plus body-capture flags, for events whose remaining data (headers, error
+// payloads) still exceeds the retained-size cap.
+func compactAuditPreviewForRetention(preview auditPreview) auditPreview {
+	if preview.Data == nil {
+		return preview
+	}
+	preview.Data = &auditPreviewData{
+		RequestBodyCaptured:        preview.Data.RequestBody != nil,
+		ResponseBodyCaptured:       preview.Data.ResponseBody != nil && !preview.Data.ResponseBodyPartial,
+		RequestBodyTooBigToHandle:  preview.Data.RequestBodyTooBigToHandle,
+		ResponseBodyTooBigToHandle: preview.Data.ResponseBodyTooBigToHandle,
+	}
+	return preview
 }
 
 // PublishUsageEvent publishes a compact usage log event. Cached usage entries
@@ -500,6 +608,15 @@ type auditPreviewData struct {
 	ResponseBody               any                                `json:"response_body,omitempty"`
 	RequestBodyTooBigToHandle  bool                               `json:"request_body_too_big_to_handle,omitempty"`
 	ResponseBodyTooBigToHandle bool                               `json:"response_body_too_big_to_handle,omitempty"`
+	// ResponseBodyPartial marks a response body still being reconstructed from
+	// a running stream (audit.stream events). Set only on fan-out copies; the
+	// flag is cleared when bodies are stripped for retention so it cannot go
+	// stale in merged active snapshots.
+	ResponseBodyPartial bool `json:"response_body_partial,omitempty"`
+	// RequestBodyCaptured/ResponseBodyCaptured mark replay copies whose bodies
+	// were stripped from broker retention; the persisted audit entry has them.
+	RequestBodyCaptured  bool `json:"request_body_captured,omitempty"`
+	ResponseBodyCaptured bool `json:"response_body_captured,omitempty"`
 	// Attempts carries the provider attempt summaries so the live audit row can
 	// surface the failover/retry indicator without waiting for the persisted
 	// entry. Per-attempt response bodies/headers are omitted to keep the live
@@ -554,6 +671,11 @@ func auditPreviewFromEntry(eventType string, entry *auditlog.LogEntry) auditPrev
 			data.RequestBody = entry.Data.RequestBody
 			data.RequestBodyTooBigToHandle = entry.Data.RequestBodyTooBigToHandle
 		}
+		if auditPreviewIncludesLiveResponseBody(eventType) {
+			data.ResponseBody = entry.Data.ResponseBody
+			data.ResponseBodyPartial = entry.Data.ResponseBody != nil
+			data.ResponseBodyTooBigToHandle = entry.Data.ResponseBodyTooBigToHandle
+		}
 		if auditPreviewIncludesCapturedData(eventType) {
 			data.UserAgent = entry.Data.UserAgent
 			data.APIKeyHash = entry.Data.APIKeyHash
@@ -583,6 +705,14 @@ func auditPreviewIncludesLiveRequestBody(eventType string) bool {
 	return eventType == EventAuditUpdated
 }
 
+// auditPreviewIncludesLiveResponseBody reports event types that carry the
+// in-flight partial response body. Deliberately not audit.updated: metadata
+// updates would otherwise fan out heavy handler-set bodies (e.g. audio)
+// mid-request that completion events deliver anyway.
+func auditPreviewIncludesLiveResponseBody(eventType string) bool {
+	return eventType == EventAuditStream
+}
+
 func auditPreviewIncludesCapturedData(eventType string) bool {
 	return eventType == EventAuditCompleted || eventType == EventAuditFlushed || eventType == EventAuditFailed
 }
@@ -602,6 +732,9 @@ func (d auditPreviewData) hasValues() bool {
 		d.ResponseBody != nil ||
 		d.RequestBodyTooBigToHandle ||
 		d.ResponseBodyTooBigToHandle ||
+		d.ResponseBodyPartial ||
+		d.RequestBodyCaptured ||
+		d.ResponseBodyCaptured ||
 		len(d.Attempts) > 0
 }
 

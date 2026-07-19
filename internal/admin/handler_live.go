@@ -11,8 +11,8 @@ import (
 
 	"github.com/labstack/echo/v5"
 
-	"gomodel/internal/core"
-	"gomodel/internal/live"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/live"
 )
 
 // LiveLogs handles GET /admin/live/logs.
@@ -113,7 +113,7 @@ func liveTypeFilter(raw string) liveLogTypeFilter {
 		provided: true,
 		types:    map[string]struct{}{},
 	}
-	for _, item := range strings.Split(raw, ",") {
+	for item := range strings.SplitSeq(raw, ",") {
 		item = strings.ToLower(strings.TrimSpace(item))
 		switch item {
 		case "audit", "usage":

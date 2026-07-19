@@ -4,9 +4,16 @@ import (
 	"context"
 	"io"
 
-	"gomodel/internal/core"
-	"gomodel/internal/usage"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/usage"
 )
+
+// RouteGate reports whether a provider/model route currently has rate-limit
+// capacity. Failover uses it to skip saturated targets; admission at the
+// handler layer stays the authoritative check.
+type RouteGate interface {
+	RouteAvailable(providerName, model string) bool
+}
 
 // InferenceConfig configures translated inference orchestration.
 type InferenceConfig struct {
@@ -18,6 +25,7 @@ type InferenceConfig struct {
 	TranslatedRequestPatcher TranslatedRequestPatcher
 	UsageLogger              usage.LoggerInterface
 	PricingResolver          usage.PricingResolver
+	RouteGate                RouteGate
 	GuardrailsHash           string
 }
 
@@ -32,6 +40,7 @@ type InferenceOrchestrator struct {
 	translatedRequestPatcher TranslatedRequestPatcher
 	usageLogger              usage.LoggerInterface
 	pricingResolver          usage.PricingResolver
+	routeGate                RouteGate
 	guardrailsHash           string
 }
 
@@ -46,6 +55,7 @@ func NewInferenceOrchestrator(cfg InferenceConfig) *InferenceOrchestrator {
 		translatedRequestPatcher: cfg.TranslatedRequestPatcher,
 		usageLogger:              cfg.UsageLogger,
 		pricingResolver:          cfg.PricingResolver,
+		routeGate:                cfg.RouteGate,
 		guardrailsHash:           cfg.GuardrailsHash,
 	}
 }

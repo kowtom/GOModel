@@ -5,12 +5,11 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
 
-	"gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/core"
 )
 
 // BudgetsConfig holds per-user-path spend limits.
@@ -31,81 +30,44 @@ type BudgetUserPathConfig struct {
 }
 
 // BudgetLimitConfig declares one spend limit for a reset period.
+// The json tags support the JSON-array form of SET_BUDGET_* env values.
 type BudgetLimitConfig struct {
 	// Period accepts hourly, daily, weekly, or monthly. The resolved period is
 	// persisted as PeriodSeconds in the database.
-	Period string `yaml:"period"`
+	Period string `yaml:"period" json:"period"`
 
 	// PeriodSeconds can be set directly instead of Period. Standard values are
 	// 3600, 86400, 604800, and 2592000.
-	PeriodSeconds int64 `yaml:"period_seconds"`
+	PeriodSeconds int64 `yaml:"period_seconds" json:"period_seconds"`
 
 	// Amount is the maximum allowed tracked provider spend for the period.
-	Amount float64 `yaml:"amount"`
+	Amount float64 `yaml:"amount" json:"amount"`
 }
 
-func applyBudgetEnv(cfg *Config) error {
+func applyBudgetEnv(cfg *Config, strict bool) error {
 	if cfg == nil {
 		return nil
 	}
 	if !cfg.Budgets.Enabled {
 		return nil
 	}
-
-	const prefix = "SET_BUDGET_"
-	for _, item := range os.Environ() {
-		key, value, ok := strings.Cut(item, "=")
-		if !ok || !strings.HasPrefix(key, prefix) || strings.TrimSpace(value) == "" {
-			continue
-		}
-		path, err := core.NormalizeUserPath(budgetEnvPath(key[len(prefix):]))
-		if err != nil {
-			return fmt.Errorf("invalid value for %s: %w", key, err)
-		}
-		limits, err := parseBudgetEnvLimits(value)
-		if err != nil {
-			return fmt.Errorf("invalid value for %s: %w", key, err)
-		}
-		if len(limits) == 0 {
-			continue
-		}
-		entry := BudgetUserPathConfig{
-			Path:   path,
-			Limits: limits,
-		}
-		// Compare against the canonical form so env entries replace YAML entries
-		// even when YAML uses non-canonical paths like "alice" or "/alice/".
-		replaced := cfg.Budgets.UserPaths[:0]
-		for _, existing := range cfg.Budgets.UserPaths {
-			existingNorm, normErr := core.NormalizeUserPath(existing.Path)
-			if normErr != nil || existingNorm != entry.Path {
-				replaced = append(replaced, existing)
-			}
-		}
-		cfg.Budgets.UserPaths = append(replaced, entry)
+	entries, err := applyUserPathLimitEnv(
+		cfg.Budgets.UserPaths,
+		"SET_BUDGET_",
+		func(entry BudgetUserPathConfig) string { return entry.Path },
+		func(raw string) ([]BudgetLimitConfig, error) { return parseBudgetEnvLimits(raw, strict) },
+		func(path string, limits []BudgetLimitConfig) BudgetUserPathConfig {
+			return BudgetUserPathConfig{Path: path, Limits: limits}
+		},
+	)
+	if err != nil {
+		return err
 	}
+	cfg.Budgets.UserPaths = entries
 	return nil
 }
 
-func budgetEnvPath(suffix string) string {
-	suffix = strings.ToLower(strings.TrimSpace(suffix))
-	if suffix == "" {
-		return "/"
-	}
-	segments := make([]string, 0)
-	for _, part := range strings.Split(suffix, "__") {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			segments = append(segments, part)
-		}
-	}
-	if len(segments) == 0 {
-		return "/"
-	}
-	return "/" + strings.Join(segments, "/")
-}
-
-func parseBudgetEnvLimits(raw string) ([]BudgetLimitConfig, error) {
+func parseBudgetEnvLimits(raw string, strict bool) ([]BudgetLimitConfig, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil, nil
@@ -128,7 +90,7 @@ func parseBudgetEnvLimits(raw string) ([]BudgetLimitConfig, error) {
 	}
 	if strings.HasPrefix(raw, "[") {
 		var limits []BudgetLimitConfig
-		if err := json.Unmarshal([]byte(raw), &limits); err != nil {
+		if err := decodeIaCJSON("SET_BUDGET_*", raw, &limits, strict); err != nil {
 			return nil, err
 		}
 		return limits, nil

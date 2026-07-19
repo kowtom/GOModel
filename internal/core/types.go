@@ -1,6 +1,10 @@
 package core
 
-import "github.com/goccy/go-json"
+import (
+	"maps"
+
+	"github.com/goccy/go-json"
+)
 
 // StreamOptions controls streaming behavior options.
 // This is used to request usage data in streaming responses.
@@ -114,6 +118,12 @@ type Choice struct {
 	FinishReason string          `json:"finish_reason"`
 	Index        int             `json:"index"`
 	Logprobs     json.RawMessage `json:"logprobs,omitempty" swaggertype:"object"`
+	// StopSequence is the matched stop sequence when the provider reports one
+	// natively (Anthropic stop_reason "stop_sequence"). OpenAI's finish_reason
+	// "stop" conflates natural stops with stop-parameter hits, so this is an
+	// extension field: present only when the provider knows the answer, in the
+	// same spirit as the relayed reasoning_content extension.
+	StopSequence string `json:"stop_sequence,omitempty"`
 }
 
 // ResponseMessage represents a single assistant message in a chat response.
@@ -415,9 +425,7 @@ func (m *ModelMetadata) Clone() *ModelMetadata {
 	}
 	if len(m.Capabilities) > 0 {
 		caps := make(map[string]bool, len(m.Capabilities))
-		for k, v := range m.Capabilities {
-			caps[k] = v
-		}
+		maps.Copy(caps, m.Capabilities)
 		out.Capabilities = caps
 	} else {
 		out.Capabilities = nil
@@ -436,9 +444,7 @@ func (m *ModelMetadata) Clone() *ModelMetadata {
 	out.Pricing = m.Pricing.Clone()
 	if len(m.PricingSources) > 0 {
 		out.PricingSources = make(map[string]string, len(m.PricingSources))
-		for k, v := range m.PricingSources {
-			out.PricingSources[k] = v
-		}
+		maps.Copy(out.PricingSources, m.PricingSources)
 	} else {
 		out.PricingSources = nil
 	}

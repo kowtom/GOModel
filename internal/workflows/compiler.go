@@ -4,18 +4,13 @@ import (
 	"errors"
 	"net/http"
 
-	"gomodel/internal/core"
-	"gomodel/internal/guardrails"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/guardrails"
 )
 
 type compiler struct {
 	registry    guardrails.Catalog
 	featureCaps core.WorkflowFeatures
-}
-
-// NewCompiler creates the default workflow compiler for the v1 payload.
-func NewCompiler(registry guardrails.Catalog) Compiler {
-	return NewCompilerWithFeatureCaps(registry, core.DefaultWorkflowFeatures())
 }
 
 // NewCompilerWithFeatureCaps creates the default workflow compiler for the

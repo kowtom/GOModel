@@ -6,12 +6,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
 	"github.com/goccy/go-json"
 
-	"gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/core"
 )
 
 // ErrNotFound indicates a requested conversation was not found.
@@ -24,8 +25,8 @@ type StoredConversation struct {
 	Items        []json.RawMessage  `json:"items,omitempty"`
 	UserPath     string             `json:"user_path,omitempty"`
 	RequestID    string             `json:"request_id,omitempty"`
-	StoredAt     time.Time          `json:"stored_at,omitempty"`
-	ExpiresAt    time.Time          `json:"expires_at,omitempty"`
+	StoredAt     time.Time          `json:"stored_at"`
+	ExpiresAt    time.Time          `json:"expires_at"`
 }
 
 // Store defines persistence operations for the Conversations lifecycle API.
@@ -42,19 +43,26 @@ type Store interface {
 }
 
 func cloneConversation(src *StoredConversation) (*StoredConversation, error) {
+	dst, _, err := cloneConversationWithSize(src)
+	return dst, err
+}
+
+// cloneConversationWithSize deep-copies a snapshot and reports its serialized
+// size, which the memory store uses for byte-budget accounting.
+func cloneConversationWithSize(src *StoredConversation) (*StoredConversation, int64, error) {
 	if src == nil {
-		return nil, fmt.Errorf("conversation is nil")
+		return nil, 0, fmt.Errorf("conversation is nil")
 	}
 	normalized := normalizeStoredConversation(src)
 	b, err := json.Marshal(normalized)
 	if err != nil {
-		return nil, fmt.Errorf("marshal conversation: %w", err)
+		return nil, 0, fmt.Errorf("marshal conversation: %w", err)
 	}
 	var dst StoredConversation
 	if err := json.Unmarshal(b, &dst); err != nil {
-		return nil, fmt.Errorf("unmarshal conversation: %w", err)
+		return nil, 0, fmt.Errorf("unmarshal conversation: %w", err)
 	}
-	return &dst, nil
+	return &dst, int64(len(b)), nil
 }
 
 func normalizeStoredConversation(src *StoredConversation) *StoredConversation {
@@ -70,9 +78,7 @@ func normalizeStoredConversation(src *StoredConversation) *StoredConversation {
 		conversationCopy := *src.Conversation
 		if conversationCopy.Metadata != nil {
 			metadataCopy := make(map[string]string, len(conversationCopy.Metadata))
-			for key, value := range conversationCopy.Metadata {
-				metadataCopy[key] = value
-			}
+			maps.Copy(metadataCopy, conversationCopy.Metadata)
 			conversationCopy.Metadata = metadataCopy
 		}
 		normalized.Conversation = &conversationCopy

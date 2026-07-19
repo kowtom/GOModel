@@ -4,6 +4,7 @@ package integration
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -13,9 +14,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"gomodel/internal/providers"
-	"gomodel/internal/usage"
-	"gomodel/tests/integration/dbassert"
+	"github.com/enterpilot/gomodel/internal/providers"
+	"github.com/enterpilot/gomodel/internal/usage"
+	"github.com/enterpilot/gomodel/tests/integration/dbassert"
 )
 
 func TestAdminUsageSummary_PostgreSQL(t *testing.T) {
@@ -30,7 +31,7 @@ func TestAdminUsageSummary_PostgreSQL(t *testing.T) {
 	dbassert.ClearUsage(t, fixture.PgPool)
 
 	// Send 2 chat requests
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		payload := newChatRequest("gpt-4", "Hello!")
 		resp := sendChatRequest(t, fixture.ServerURL, payload)
 		require.Equal(t, 200, resp.StatusCode)
@@ -73,7 +74,7 @@ func TestAdminDailyUsage_PostgreSQL(t *testing.T) {
 	dbassert.ClearUsage(t, fixture.PgPool)
 
 	// Send requests
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		payload := newChatRequest("gpt-4", "Hello!")
 		resp := sendChatRequest(t, fixture.ServerURL, payload)
 		require.Equal(t, 200, resp.StatusCode)
@@ -128,7 +129,7 @@ func TestAdminUsageSummary_MongoDB(t *testing.T) {
 	dbassert.ClearUsageMongo(t, fixture.MongoDb)
 
 	// Send 2 chat requests
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		payload := newChatRequest("gpt-4", "Hello!")
 		resp := sendChatRequest(t, fixture.ServerURL, payload)
 		require.Equal(t, 200, resp.StatusCode)
@@ -227,6 +228,59 @@ func TestAdminPricingRecalculationNoMasterKey_PostgreSQL(t *testing.T) {
 	assert.Equal(t, "ok", result.Status)
 	assert.GreaterOrEqual(t, result.Matched, int64(1))
 	assert.GreaterOrEqual(t, result.Recalculated, int64(1))
+
+	fixture.FlushAndClose(t)
+}
+
+func TestAdminPricingRecalculationRefreshesRewriteSavings_PostgreSQL(t *testing.T) {
+	fixture := SetupTestServer(t, TestServerConfig{
+		DBType:                           "postgresql",
+		UsageEnabled:                     true,
+		UsagePricingRecalculationEnabled: true,
+		AdminEndpointsEnabled:            true,
+		OnlyModelInteractions:            false,
+	})
+
+	dbassert.ClearUsage(t, fixture.PgPool)
+
+	payload := newChatRequest("gpt-4", "Hello!")
+	resp := sendChatRequest(t, fixture.ServerURL, payload)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	closeBody(resp)
+
+	time.Sleep(2 * time.Second)
+
+	// Simulate a request-rewriter savings estimate persisted with a stale
+	// cost, as if pricing changed after the row was written.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	tag, err := fixture.PgPool.Exec(ctx,
+		"UPDATE usage SET rewrite_tokens_saved = 500000, rewrite_cost_saved = 123.0")
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, tag.RowsAffected(), int64(1))
+
+	req, err := http.NewRequest(http.MethodPost, fixture.ServerURL+"/admin/usage/recalculate-pricing", bytes.NewBufferString(`{"confirmation":"recalculate"}`))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer closeBody(resp)
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var result usage.RecalculatePricingResult
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	assert.Equal(t, "ok", result.Status)
+	require.GreaterOrEqual(t, result.Recalculated, int64(1))
+
+	// The fixture prices models at a flat $1000/Mtok input, so 500k saved
+	// tokens must recalculate to exactly $500 (input-cost delta), replacing
+	// the stale $123 value.
+	var costSaved *float64
+	require.NoError(t, fixture.PgPool.QueryRow(ctx,
+		"SELECT rewrite_cost_saved FROM usage WHERE rewrite_tokens_saved = 500000 LIMIT 1").Scan(&costSaved))
+	require.NotNil(t, costSaved, "rewrite_cost_saved must be repriced, not cleared")
+	assert.InDelta(t, 500.0, *costSaved, 1e-9)
 
 	fixture.FlushAndClose(t)
 }

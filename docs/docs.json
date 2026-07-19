@@ -11,7 +11,9 @@
         "dark": "/logo.svg"
     },
     "colors": {
-        "primary": "#755c3d"
+        "primary": "#2563eb",
+        "light": "#60a5fa",
+        "dark": "#1d4ed8"
     },
     "icons": {
         "library": "lucide"
@@ -19,12 +21,25 @@
     "api": {
         "url": "full"
     },
+    "integrations": {
+        "posthog": {
+            "apiKey": "phc_pHSTwDSn6q3sB9jcMfAUGFCG8WjgSqAMERjRsMKDyie9"
+        }
+    },
     "redirects": [
         {
             "source": "/features/aliases",
             "destination": "/features/virtual-models"
         }
     ],
+    "navbar": {
+        "links": [
+            {
+                "type": "github",
+                "href": "https://github.com/ENTERPILOT/GoModel"
+            }
+        ]
+    },
     "navigation": {
         "global": {
             "anchors": [
@@ -55,9 +70,19 @@
                             "features/user-path",
                             "features/passthrough-api",
                             "features/budgets",
+                            "features/rate-limits",
                             "features/cost-tracking",
+                            "features/labelling",
                             "features/cache",
                             "features/failover"
+                        ]
+                    },
+                    {
+                        "group": "MCP Proxy",
+                        "icon": "waypoints",
+                        "pages": [
+                            "features/mcp-gateway",
+                            "mcp-proxy/claude-code-and-codex"
                         ]
                     },
                     {
@@ -74,6 +99,7 @@
                             "advanced/conversations-api",
                             "advanced/anthropic-messages-api",
                             "advanced/audio-api",
+                            "advanced/usage-api",
                             "advanced/guardrails",
                             "advanced/workflows",
                             "advanced/admin-endpoints"
@@ -110,20 +136,24 @@
                 "icon": "plug",
                 "pages": [
                     "providers/overview",
+                    "providers/key-rotation",
                     "providers/anthropic",
                     "providers/gemini",
                     "providers/deepseek",
+                    "providers/xai",
                     "providers/bailian",
                     "providers/xiaomi",
                     "providers/opencode-go",
                     "providers/vllm",
                     "providers/multiple-ollama",
+                    "providers/kimicode",
                     {
                         "group": "Cloud Platforms",
                         "icon": "cloud",
                         "pages": [
                             "providers/vertex",
                             "providers/bedrock",
+                            "providers/bedrock-mantle",
                             "providers/azure",
                             "providers/oracle"
                         ]

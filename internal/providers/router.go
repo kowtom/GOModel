@@ -11,7 +11,7 @@ import (
 	"sort"
 	"strings"
 
-	"gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/core"
 )
 
 // ErrRegistryNotInitialized is returned when the router is used before the registry has any models.
@@ -791,6 +791,44 @@ func (r *Router) RealtimeTarget(ctx context.Context, req *core.RealtimeRequest) 
 	return rp.RealtimeTarget(ctx, &core.RealtimeRequest{
 		Model:    selector.Model,
 		Provider: selector.Provider,
+		CallID:   req.CallID,
+	})
+}
+
+// RealtimeCallTarget resolves the upstream HTTP endpoint for the WebRTC SDP
+// exchange, requiring the model's provider to implement core.RealtimeCallProvider.
+func (r *Router) RealtimeCallTarget(ctx context.Context, req *core.RealtimeRequest) (*core.RealtimeHTTPTarget, error) {
+	return r.realtimeCallTarget(ctx, req, core.RealtimeCallProvider.RealtimeCallTarget)
+}
+
+// RealtimeClientSecretTarget resolves the upstream HTTP endpoint for minting
+// ephemeral realtime client secrets.
+func (r *Router) RealtimeClientSecretTarget(ctx context.Context, req *core.RealtimeRequest) (*core.RealtimeHTTPTarget, error) {
+	return r.realtimeCallTarget(ctx, req, core.RealtimeCallProvider.RealtimeClientSecretTarget)
+}
+
+// realtimeCallTarget mirrors RealtimeTarget for the realtime HTTP signaling
+// endpoints: resolve the model, narrow to the capability, and forward the bare
+// provider model id.
+func (r *Router) realtimeCallTarget(
+	ctx context.Context,
+	req *core.RealtimeRequest,
+	call func(core.RealtimeCallProvider, context.Context, *core.RealtimeRequest) (*core.RealtimeHTTPTarget, error),
+) (*core.RealtimeHTTPTarget, error) {
+	if req == nil {
+		return nil, core.NewInvalidRequestError("realtime request is required", nil)
+	}
+	p, selector, err := r.resolveProvider(ctx, req.Model, req.Provider)
+	if err != nil {
+		return nil, err
+	}
+	rp, ok := p.(core.RealtimeCallProvider)
+	if !ok {
+		return nil, core.NewInvalidRequestError(fmt.Sprintf("model %q does not support realtime calls", req.Model), nil)
+	}
+	return call(rp, ctx, &core.RealtimeRequest{
+		Model:    selector.Model,
+		Provider: selector.Provider,
 	})
 }
 
@@ -1041,6 +1079,20 @@ func (r *Router) CancelBatch(ctx context.Context, providerType, id string) (*cor
 		return bp.CancelBatch(ctx, id)
 	})
 	return stampProvider(resp, providerType), err
+}
+
+// DeleteBatch routes native batch deletion to a provider type. It reports
+// core.ErrNativeBatchDeleteUnsupported for providers whose upstream batch API
+// has no delete operation, so callers can fall back to gateway-local deletion.
+func (r *Router) DeleteBatch(ctx context.Context, providerType, id string) error {
+	_, err := routeNativeBatchCall(r, ctx, providerType, func(ctx context.Context, bp core.NativeBatchProvider) (struct{}, error) {
+		deleter, ok := bp.(core.NativeBatchDeleteProvider)
+		if !ok {
+			return struct{}{}, core.ErrNativeBatchDeleteUnsupported
+		}
+		return struct{}{}, deleter.DeleteBatch(ctx, id)
+	})
+	return err
 }
 
 // GetBatchResults routes native batch results lookup to a provider type.

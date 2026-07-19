@@ -17,10 +17,11 @@ import (
 // Lifecycle:
 //   - DeriveWhiteBoxPrompt seeds these values directly from transport/body data.
 //   - Canonical JSON decode may refine them from a cached request object.
-//   - NormalizeModelSelector canonicalizes model/provider values in place.
+//   - Selector normalization (ParseModelSelector / RequestedModelSelector.Normalize)
+//     canonicalizes model/provider values in place.
 //
 // Consumers that require canonical selector state should prefer a cached canonical
-// request or call NormalizeModelSelector before relying on these fields.
+// request or normalize the selector before relying on these fields.
 type RouteHints struct {
 	Model    string
 	Provider string
@@ -65,7 +66,7 @@ const (
 //   - transport seeds RouteType/OperationType plus sparse RouteHints
 //   - route-specific metadata may be cached on demand
 //   - canonical request decode may cache a parsed request and refine RouteHints
-//   - NormalizeModelSelector may rewrite selector hints into canonical form
+//   - selector normalization may rewrite selector hints into canonical form
 type WhiteBoxPrompt struct {
 	RouteType     string
 	OperationType string
@@ -339,11 +340,15 @@ func deriveSnapshotSelectorHintsGJSON(body []byte) (model, provider string, stre
 		return "", "", false, false
 	}
 
+	// Clone the extracted strings: gjson results alias the full parsed body,
+	// and these values land in RouteHints, which lives on the request context
+	// for the whole (possibly streaming) request — without the clone, two
+	// short selector strings pin a request-sized backing string.
 	if modelResult.Type == gjson.String {
-		model = modelResult.String()
+		model = strings.Clone(modelResult.String())
 	}
 	if providerResult.Type == gjson.String {
-		provider = providerResult.String()
+		provider = strings.Clone(providerResult.String())
 	}
 	if streamResult.Type == gjson.True || streamResult.Type == gjson.False {
 		stream = streamResult.Bool()
@@ -437,7 +442,18 @@ func fileIDFromTransport(path string, routeParams map[string]string) string {
 	return strings.TrimSpace(parts[2])
 }
 
+// normalizeBatchTransportPath maps the Anthropic Message Batches route root
+// (/v1/messages/batches) onto the canonical /v1/batches root so one
+// derivation covers both batch ingress dialects.
+func normalizeBatchTransportPath(path string) string {
+	if path == "/v1/messages/batches" || strings.HasPrefix(path, "/v1/messages/batches/") {
+		return "/v1/batches" + strings.TrimPrefix(path, "/v1/messages/batches")
+	}
+	return path
+}
+
 func batchActionFromTransport(method, path string) string {
+	path = normalizeBatchTransportPath(path)
 	switch {
 	case path == "/v1/batches" && method == http.MethodPost:
 		return BatchActionCreate
@@ -447,6 +463,8 @@ func batchActionFromTransport(method, path string) string {
 		return BatchActionResults
 	case strings.HasSuffix(path, "/cancel") && strings.HasPrefix(path, "/v1/batches/") && method == http.MethodPost:
 		return BatchActionCancel
+	case strings.HasPrefix(path, "/v1/batches/") && method == http.MethodDelete:
+		return BatchActionDelete
 	case strings.HasPrefix(path, "/v1/batches/") && method == http.MethodGet:
 		return BatchActionGet
 	default:
@@ -459,7 +477,7 @@ func batchIDFromTransport(path string, routeParams map[string]string) string {
 		return id
 	}
 
-	trimmed := strings.Trim(strings.TrimSpace(path), "/")
+	trimmed := strings.Trim(strings.TrimSpace(normalizeBatchTransportPath(path)), "/")
 	parts := strings.Split(trimmed, "/")
 	if len(parts) < 3 || parts[0] != "v1" || parts[1] != "batches" {
 		return ""

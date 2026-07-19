@@ -10,10 +10,10 @@ import (
 
 	"github.com/labstack/echo/v5"
 
-	"gomodel/internal/auditlog"
-	"gomodel/internal/core"
-	"gomodel/internal/streaming"
-	"gomodel/internal/usage"
+	"github.com/enterpilot/gomodel/internal/auditlog"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/streaming"
+	"github.com/enterpilot/gomodel/internal/usage"
 )
 
 var defaultEnabledPassthroughProviders = []string{"openai", "anthropic", "openrouter", "zai", "vllm", "deepseek"}
@@ -298,6 +298,7 @@ func (s *passthroughService) proxyPassthroughResponse(c *echo.Context, providerT
 			if observer := usage.NewStreamUsageObserver(s.usageLogger, model, providerType, requestID, usagePath, s.pricingResolver, core.UserPathFromContext(c.Request().Context())); observer != nil {
 				observer.SetProviderName(providerName)
 				observer.SetLabels(core.RequestLabelsFromContext(c.Request().Context()))
+				observer.SetRewriteTokensSaved(core.RewriteTokensSavedFromContext(c.Request().Context()))
 				observers = append(observers, observer)
 			}
 		}

@@ -247,6 +247,63 @@ const docTemplate = `{
                 ]
             }
         },
+        "/admin/audit/stats": {
+            "get": {
+                "description": "Returns request counts grouped into 2xx/4xx/5xx status classes\nper time bucket, an overall success-rate summary, and average\nrequest duration per provider for the dashboard charts.\nRanges up to 3 days use hourly buckets, longer ranges daily.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "admin"
+                ],
+                "summary": "Get time-bucketed request status and latency stats",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Number of days (default 30)",
+                        "name": "days",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Start date (YYYY-MM-DD)",
+                        "name": "start_date",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "End date (YYYY-MM-DD)",
+                        "name": "end_date",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/auditlog.RequestStats"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ]
+            }
+        },
         "/admin/budgets": {
             "get": {
                 "produces": [
@@ -629,6 +686,24 @@ const docTemplate = `{
                     },
                     {
                         "type": "string",
+                        "description": "Filter by exact model name",
+                        "name": "model",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by provider name or provider type",
+                        "name": "provider",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by request label (exact match)",
+                        "name": "label",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
                         "description": "Filter by tracked user path subtree",
                         "name": "user_path",
                         "in": "query"
@@ -938,6 +1013,274 @@ const docTemplate = `{
                 ]
             }
         },
+        "/admin/mcp-servers": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "admin"
+                ],
+                "summary": "List MCP servers (config-declared and admin-managed)",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/admin.mcpServerViewResponse"
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ]
+            },
+            "put": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "admin"
+                ],
+                "summary": "Create or update one admin-managed MCP server",
+                "parameters": [
+                    {
+                        "description": "MCP server definition",
+                        "name": "mcp_server",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/admin.upsertMCPServerRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/admin.mcpServerViewResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    },
+                    "502": {
+                        "description": "Bad Gateway",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ]
+            }
+        },
+        "/admin/mcp-servers/{name}": {
+            "delete": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "admin"
+                ],
+                "summary": "Delete one admin-managed MCP server",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "MCP server name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No Content"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    },
+                    "502": {
+                        "description": "Bad Gateway",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ]
+            }
+        },
+        "/admin/mcp-servers/{name}/catalog": {
+            "get": {
+                "description": "Lists the tools, prompts, resources, and resource templates the named server currently exposes through the gateway, after operator tool filters. Names are the upstream originals; the aggregated /mcp endpoint prefixes them with the server name.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "admin"
+                ],
+                "summary": "Inspect one MCP server's current catalog",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "MCP server name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/mcpgateway.CatalogView"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ]
+            }
+        },
+        "/admin/mcp-servers/{name}/reconnect": {
+            "post": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "admin"
+                ],
+                "summary": "Force-redial one MCP server and return its fresh state",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "MCP server name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/admin.mcpServerViewResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ]
+            }
+        },
         "/admin/model-pricing-overrides": {
             "get": {
                 "description": "Lists persisted USD pricing overrides. Selectors support global \"/\", provider-wide \"provider/\", model-wide \"model\", and exact \"provider/model\" scopes.",
@@ -1188,6 +1531,262 @@ const docTemplate = `{
                 ]
             }
         },
+        "/admin/rate-limits": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "admin"
+                ],
+                "summary": "List rate limit rules with live counter status",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/admin.rateLimitListResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ]
+            },
+            "put": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "admin"
+                ],
+                "summary": "Create or update one rate limit rule",
+                "parameters": [
+                    {
+                        "description": "Rate limit key and limits",
+                        "name": "rule",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/admin.upsertRateLimitRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/admin.rateLimitListResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ]
+            },
+            "delete": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "admin"
+                ],
+                "summary": "Delete one rate limit rule",
+                "parameters": [
+                    {
+                        "description": "Rate limit key",
+                        "name": "rule",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/admin.deleteRateLimitRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/admin.rateLimitListResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ]
+            }
+        },
+        "/admin/rate-limits/reset": {
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "admin"
+                ],
+                "summary": "Reset the live counters of all rate limit rules",
+                "parameters": [
+                    {
+                        "description": "Reset confirmation",
+                        "name": "confirmation",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/admin.resetRateLimitsRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/admin.resetRateLimitsResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ]
+            }
+        },
+        "/admin/rate-limits/reset-one": {
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "admin"
+                ],
+                "summary": "Reset the live counters of one rate limit rule",
+                "parameters": [
+                    {
+                        "description": "Rate limit key",
+                        "name": "rule",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/admin.resetRateLimitRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/admin.rateLimitListResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ]
+            }
+        },
         "/admin/runtime/config": {
             "get": {
                 "produces": [
@@ -1206,6 +1805,96 @@ const docTemplate = `{
                     },
                     "401": {
                         "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ]
+            }
+        },
+        "/admin/tagging/settings": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "admin"
+                ],
+                "summary": "Get header tagging rules",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/admin.taggingSettingsResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ]
+            },
+            "put": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "admin"
+                ],
+                "summary": "Replace operator header tagging rules",
+                "parameters": [
+                    {
+                        "description": "Operator tagging rules",
+                        "name": "settings",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/admin.updateTaggingSettingsRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/admin.taggingSettingsResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
                         "schema": {
                             "$ref": "#/definitions/core.GatewayError"
                         }
@@ -1254,6 +1943,24 @@ const docTemplate = `{
                     },
                     {
                         "type": "string",
+                        "description": "Filter by exact model name",
+                        "name": "model",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by provider name or provider type",
+                        "name": "provider",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by request label (exact match)",
+                        "name": "label",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
                         "description": "Filter by tracked user path subtree",
                         "name": "user_path",
                         "in": "query"
@@ -1272,6 +1979,96 @@ const docTemplate = `{
                             "type": "array",
                             "items": {
                                 "$ref": "#/definitions/usage.DailyUsage"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ]
+            }
+        },
+        "/admin/usage/labels": {
+            "get": {
+                "description": "Returns per-label token and cost aggregates. Requests carrying\nseveral labels count once per label, so rows overlap and do\nnot sum to the period totals. Unlabelled requests are omitted.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "admin"
+                ],
+                "summary": "Get usage breakdown by request label",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Number of days (default 30)",
+                        "name": "days",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Start date (YYYY-MM-DD)",
+                        "name": "start_date",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "End date (YYYY-MM-DD)",
+                        "name": "end_date",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by exact model name",
+                        "name": "model",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by provider name or provider type",
+                        "name": "provider",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by request label (exact match)",
+                        "name": "label",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by tracked user path subtree",
+                        "name": "user_path",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Cache mode filter: uncached, cached, all (default uncached)",
+                        "name": "cache_mode",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/usage.LabelUsage"
                             }
                         }
                     },
@@ -1325,7 +2122,7 @@ const docTemplate = `{
                     },
                     {
                         "type": "string",
-                        "description": "Filter by model name",
+                        "description": "Filter by exact model name",
                         "name": "model",
                         "in": "query"
                     },
@@ -1333,6 +2130,12 @@ const docTemplate = `{
                         "type": "string",
                         "description": "Filter by provider name or provider type",
                         "name": "provider",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by request label (exact match)",
+                        "name": "label",
                         "in": "query"
                     },
                     {
@@ -1419,6 +2222,24 @@ const docTemplate = `{
                         "type": "string",
                         "description": "End date (YYYY-MM-DD)",
                         "name": "end_date",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by exact model name",
+                        "name": "model",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by provider name or provider type",
+                        "name": "provider",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by request label (exact match)",
+                        "name": "label",
                         "in": "query"
                     },
                     {
@@ -1556,6 +2377,24 @@ const docTemplate = `{
                     },
                     {
                         "type": "string",
+                        "description": "Filter by exact model name",
+                        "name": "model",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by provider name or provider type",
+                        "name": "provider",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by request label (exact match)",
+                        "name": "label",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
                         "description": "Filter by tracked user path subtree",
                         "name": "user_path",
                         "in": "query"
@@ -1666,6 +2505,24 @@ const docTemplate = `{
                         "type": "string",
                         "description": "End date (YYYY-MM-DD)",
                         "name": "end_date",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by exact model name",
+                        "name": "model",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by provider name or provider type",
+                        "name": "provider",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by request label (exact match)",
+                        "name": "label",
                         "in": "query"
                     },
                     {
@@ -1921,6 +2778,331 @@ const docTemplate = `{
                         }
                     }
                 }
+            }
+        },
+        "/mcp": {
+            "get": {
+                "description": "Streamable-HTTP MCP endpoint aggregating every configured upstream MCP server visible to the caller. Tools and prompts are namespaced as {server}_{name}. POST carries JSON-RPC messages, GET opens the server-notification SSE stream, DELETE ends the session. The X-MCP-Servers request header optionally narrows the visible servers to a comma-separated subset.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json",
+                    "text/event-stream"
+                ],
+                "tags": [
+                    "mcp"
+                ],
+                "summary": "MCP gateway (aggregated)",
+                "responses": {
+                    "200": {
+                        "description": "JSON-RPC response or SSE stream",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    },
+                    "429": {
+                        "description": "Too Many Requests",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    },
+                    "501": {
+                        "description": "Not Implemented",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ]
+            },
+            "post": {
+                "description": "Streamable-HTTP MCP endpoint aggregating every configured upstream MCP server visible to the caller. Tools and prompts are namespaced as {server}_{name}. POST carries JSON-RPC messages, GET opens the server-notification SSE stream, DELETE ends the session. The X-MCP-Servers request header optionally narrows the visible servers to a comma-separated subset.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json",
+                    "text/event-stream"
+                ],
+                "tags": [
+                    "mcp"
+                ],
+                "summary": "MCP gateway (aggregated)",
+                "responses": {
+                    "200": {
+                        "description": "JSON-RPC response or SSE stream",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    },
+                    "429": {
+                        "description": "Too Many Requests",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    },
+                    "501": {
+                        "description": "Not Implemented",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ]
+            },
+            "delete": {
+                "description": "Streamable-HTTP MCP endpoint aggregating every configured upstream MCP server visible to the caller. Tools and prompts are namespaced as {server}_{name}. POST carries JSON-RPC messages, GET opens the server-notification SSE stream, DELETE ends the session. The X-MCP-Servers request header optionally narrows the visible servers to a comma-separated subset.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json",
+                    "text/event-stream"
+                ],
+                "tags": [
+                    "mcp"
+                ],
+                "summary": "MCP gateway (aggregated)",
+                "responses": {
+                    "200": {
+                        "description": "JSON-RPC response or SSE stream",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    },
+                    "429": {
+                        "description": "Too Many Requests",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    },
+                    "501": {
+                        "description": "Not Implemented",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ]
+            }
+        },
+        "/mcp/{server}": {
+            "get": {
+                "description": "Streamable-HTTP MCP endpoint exposing one configured upstream MCP server with original (un-prefixed) tool names.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json",
+                    "text/event-stream"
+                ],
+                "tags": [
+                    "mcp"
+                ],
+                "summary": "MCP gateway (single server)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Configured MCP server name",
+                        "name": "server",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "JSON-RPC response or SSE stream",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    },
+                    "429": {
+                        "description": "Too Many Requests",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    },
+                    "501": {
+                        "description": "Not Implemented",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ]
+            },
+            "post": {
+                "description": "Streamable-HTTP MCP endpoint exposing one configured upstream MCP server with original (un-prefixed) tool names.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json",
+                    "text/event-stream"
+                ],
+                "tags": [
+                    "mcp"
+                ],
+                "summary": "MCP gateway (single server)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Configured MCP server name",
+                        "name": "server",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "JSON-RPC response or SSE stream",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    },
+                    "429": {
+                        "description": "Too Many Requests",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    },
+                    "501": {
+                        "description": "Not Implemented",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ]
+            },
+            "delete": {
+                "description": "Streamable-HTTP MCP endpoint exposing one configured upstream MCP server with original (un-prefixed) tool names.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json",
+                    "text/event-stream"
+                ],
+                "tags": [
+                    "mcp"
+                ],
+                "summary": "MCP gateway (single server)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Configured MCP server name",
+                        "name": "server",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "JSON-RPC response or SSE stream",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    },
+                    "429": {
+                        "description": "Too Many Requests",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    },
+                    "501": {
+                        "description": "Not Implemented",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ]
             }
         },
         "/p/{provider}/{endpoint}": {
@@ -3791,7 +4973,7 @@ const docTemplate = `{
         },
         "/v1/realtime": {
             "get": {
-                "description": "Upgrades to a websocket and relays an OpenAI-compatible realtime (speech-to-speech) session to the provider that owns the model named in the ?model= query parameter. Provider credentials are injected by the gateway.",
+                "description": "Upgrades to a websocket and relays an OpenAI-compatible realtime (speech-to-speech) session to the provider that owns the model named in the ?model= query parameter. Provider credentials are injected by the gateway. Passing ?call_id= instead attaches to an existing WebRTC/SIP call as a sideband channel; calls created through this gateway instance are routed automatically, others need explicit model (and provider) parameters.",
                 "tags": [
                     "realtime"
                 ],
@@ -3799,15 +4981,20 @@ const docTemplate = `{
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "Model that owns the realtime session",
+                        "description": "Model that owns the realtime session (required unless call_id names a call created through this gateway instance)",
                         "name": "model",
-                        "in": "query",
-                        "required": true
+                        "in": "query"
                     },
                     {
                         "type": "string",
                         "description": "Optional provider hint",
                         "name": "provider",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Existing WebRTC/SIP call to attach to as a sideband channel",
+                        "name": "call_id",
                         "in": "query"
                     }
                 ],
@@ -3826,6 +5013,185 @@ const docTemplate = `{
                     },
                     "401": {
                         "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    },
+                    "429": {
+                        "description": "Too Many Requests",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    },
+                    "501": {
+                        "description": "Not Implemented",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    },
+                    "502": {
+                        "description": "Bad Gateway",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ]
+            }
+        },
+        "/v1/realtime/calls": {
+            "post": {
+                "description": "OpenAI-compatible WebRTC SDP exchange. Accepts a raw application/sdp offer with the model in the ?model= query parameter, or a multipart form with sdp and session (JSON) fields. The gateway routes by model, injects provider credentials, and relays the SDP answer; the Location header carries the created call id. Media flows directly between the client and the provider, so usage is recorded by a gateway-side sideband observer when usage tracking is enabled.",
+                "consumes": [
+                    "application/sdp",
+                    "multipart/form-data"
+                ],
+                "produces": [
+                    "application/sdp",
+                    "application/json"
+                ],
+                "tags": [
+                    "realtime"
+                ],
+                "summary": "Create a realtime WebRTC call",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Model that owns the call (required for application/sdp offers)",
+                        "name": "model",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Optional provider hint",
+                        "name": "provider",
+                        "in": "query"
+                    },
+                    {
+                        "description": "SDP offer (raw application/sdp body), or a multipart form with sdp and session (JSON) fields",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "SDP answer",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    },
+                    "429": {
+                        "description": "Too Many Requests",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    },
+                    "501": {
+                        "description": "Not Implemented",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    },
+                    "502": {
+                        "description": "Bad Gateway",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ]
+            }
+        },
+        "/v1/realtime/client_secrets": {
+            "post": {
+                "description": "OpenAI-compatible ephemeral credential minting for browser and mobile realtime clients. Routes by session.model (or the transcription model for transcription sessions), applies the same model-access, budget, and rate-limit gates as other model endpoints, and relays the provider response verbatim. The minted secret authenticates the client directly against the provider, bypassing the gateway for the session itself.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "realtime"
+                ],
+                "summary": "Mint an ephemeral realtime client secret",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Optional provider hint",
+                        "name": "provider",
+                        "in": "query"
+                    },
+                    {
+                        "description": "Client secret request: session config with the routing model (session.model, or the nested transcription model) plus optional expires_after; additional fields are relayed verbatim",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "expires_after": {
+                                    "type": "object"
+                                },
+                                "session": {
+                                    "type": "object"
+                                }
+                            }
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Provider client secret response",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    },
+                    "429": {
+                        "description": "Too Many Requests",
                         "schema": {
                             "$ref": "#/definitions/core.OpenAIErrorEnvelope"
                         }
@@ -4384,6 +5750,69 @@ const docTemplate = `{
                     }
                 ]
             }
+        },
+        "/v1/usage": {
+            "get": {
+                "description": "Returns recorded usage, budget statuses, and rate limit statuses for the caller's effective user path (the path bound to the managed API key, or the user-path header for master-key callers).",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "usage"
+                ],
+                "summary": "Self-service usage, budget, and rate limit status",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Inclusive window start (YYYY-MM-DD, UTC); defaults to 29 days before end_date",
+                        "name": "start_date",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Inclusive window end (YYYY-MM-DD, UTC); defaults to today; the whole range may span at most 365 days",
+                        "name": "end_date",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Window length ending today when no explicit dates are given (default 30, max 365)",
+                        "name": "days",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/server.usageStatusResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/core.OpenAIErrorEnvelope"
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ]
+            }
         }
     },
     "definitions": {
@@ -4406,6 +5835,9 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "LOGGING_ENABLED": {
+                    "type": "string"
+                },
+                "RATE_LIMITS_ENABLED": {
                     "type": "string"
                 },
                 "REDIS_URL": {
@@ -4626,6 +6058,23 @@ const docTemplate = `{
                 }
             }
         },
+        "admin.deleteRateLimitRequest": {
+            "type": "object",
+            "properties": {
+                "limit_key": {
+                    "$ref": "#/definitions/admin.rateLimitKeyRequest"
+                },
+                "scope": {
+                    "type": "string"
+                },
+                "subject": {
+                    "type": "string"
+                },
+                "user_path": {
+                    "type": "string"
+                }
+            }
+        },
         "admin.deleteVirtualModelRequest": {
             "type": "object",
             "properties": {
@@ -4645,6 +6094,74 @@ const docTemplate = `{
                 },
                 "primary_model": {
                     "type": "string"
+                }
+            }
+        },
+        "admin.mcpServerViewResponse": {
+            "type": "object",
+            "properties": {
+                "allowed_tools": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "connected_at": {
+                    "type": "string"
+                },
+                "description": {
+                    "type": "string"
+                },
+                "disallowed_tools": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "enabled": {
+                    "type": "boolean"
+                },
+                "headers": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                },
+                "last_error": {
+                    "type": "string"
+                },
+                "managed": {
+                    "type": "boolean"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "prompt_count": {
+                    "type": "integer"
+                },
+                "resource_count": {
+                    "type": "integer"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "tool_count": {
+                    "type": "integer"
+                },
+                "tool_timeout_seconds": {
+                    "type": "integer"
+                },
+                "transport": {
+                    "type": "string"
+                },
+                "url": {
+                    "type": "string"
+                },
+                "user_paths": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
                 }
             }
         },
@@ -4687,6 +6204,87 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "selector": {
+                    "type": "string"
+                }
+            }
+        },
+        "admin.rateLimitKeyRequest": {
+            "type": "object",
+            "properties": {
+                "period": {
+                    "type": "string"
+                },
+                "period_seconds": {
+                    "type": "integer"
+                }
+            }
+        },
+        "admin.rateLimitListResponse": {
+            "type": "object",
+            "properties": {
+                "rate_limits": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/admin.rateLimitStatusResponse"
+                    }
+                },
+                "server_time": {
+                    "type": "string"
+                }
+            }
+        },
+        "admin.rateLimitStatusResponse": {
+            "type": "object",
+            "properties": {
+                "created_at": {
+                    "type": "string"
+                },
+                "in_flight": {
+                    "type": "integer"
+                },
+                "max_requests": {
+                    "type": "integer"
+                },
+                "max_tokens": {
+                    "type": "integer"
+                },
+                "period_label": {
+                    "type": "string"
+                },
+                "period_seconds": {
+                    "type": "integer"
+                },
+                "requests_remaining": {
+                    "type": "integer"
+                },
+                "requests_used": {
+                    "type": "integer"
+                },
+                "scope": {
+                    "type": "string"
+                },
+                "source": {
+                    "type": "string"
+                },
+                "subject": {
+                    "type": "string"
+                },
+                "tokens_remaining": {
+                    "type": "integer"
+                },
+                "tokens_used": {
+                    "type": "integer"
+                },
+                "updated_at": {
+                    "type": "string"
+                },
+                "user_path": {
+                    "type": "string"
+                },
+                "window_end": {
+                    "type": "string"
+                },
+                "window_start": {
                     "type": "string"
                 }
             }
@@ -4750,6 +6348,58 @@ const docTemplate = `{
                 }
             }
         },
+        "admin.resetRateLimitRequest": {
+            "type": "object",
+            "properties": {
+                "period": {
+                    "type": "string"
+                },
+                "period_seconds": {
+                    "type": "integer"
+                },
+                "scope": {
+                    "type": "string"
+                },
+                "subject": {
+                    "type": "string"
+                },
+                "user_path": {
+                    "type": "string"
+                }
+            }
+        },
+        "admin.resetRateLimitsRequest": {
+            "type": "object",
+            "properties": {
+                "confirmation": {
+                    "type": "string"
+                }
+            }
+        },
+        "admin.resetRateLimitsResponse": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string"
+                }
+            }
+        },
+        "admin.taggingSettingsResponse": {
+            "type": "object",
+            "properties": {
+                "editable": {
+                    "description": "Editable reports whether operator rules can be saved (false when no\nsettings storage is available).",
+                    "type": "boolean"
+                },
+                "headers": {
+                    "description": "Headers is the effective rule set: config/env-managed rules (read-only,\nmanaged=true) followed by operator rules persisted in the admin store.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/tagging.Rule"
+                    }
+                }
+            }
+        },
         "admin.updateBudgetSettingsRequest": {
             "type": "object",
             "properties": {
@@ -4776,6 +6426,17 @@ const docTemplate = `{
                 },
                 "weekly_reset_weekday": {
                     "type": "integer"
+                }
+            }
+        },
+        "admin.updateTaggingSettingsRequest": {
+            "type": "object",
+            "properties": {
+                "headers": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/tagging.Rule"
+                    }
                 }
             }
         },
@@ -4810,6 +6471,53 @@ const docTemplate = `{
                 }
             }
         },
+        "admin.upsertMCPServerRequest": {
+            "type": "object",
+            "properties": {
+                "allowed_tools": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "description": {
+                    "type": "string"
+                },
+                "disallowed_tools": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "enabled": {
+                    "type": "boolean"
+                },
+                "headers": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                },
+                "name": {
+                    "type": "string"
+                },
+                "tool_timeout_seconds": {
+                    "type": "integer"
+                },
+                "transport": {
+                    "type": "string"
+                },
+                "url": {
+                    "type": "string"
+                },
+                "user_paths": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
         "admin.upsertModelPricingOverrideRequest": {
             "type": "object",
             "properties": {
@@ -4817,6 +6525,29 @@ const docTemplate = `{
                     "$ref": "#/definitions/pricingoverrides.Pricing"
                 },
                 "selector": {
+                    "type": "string"
+                }
+            }
+        },
+        "admin.upsertRateLimitRequest": {
+            "type": "object",
+            "properties": {
+                "limit_key": {
+                    "$ref": "#/definitions/admin.rateLimitKeyRequest"
+                },
+                "max_requests": {
+                    "type": "integer"
+                },
+                "max_tokens": {
+                    "type": "integer"
+                },
+                "scope": {
+                    "type": "string"
+                },
+                "subject": {
+                    "type": "string"
+                },
+                "user_path": {
                     "type": "string"
                 }
             }
@@ -5213,6 +6944,13 @@ const docTemplate = `{
                         }
                     ]
                 },
+                "labels": {
+                    "description": "Labels are request labels extracted from configured tagging headers.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
                 "max_tokens": {
                     "type": "integer"
                 },
@@ -5228,6 +6966,13 @@ const docTemplate = `{
                     "type": "object",
                     "additionalProperties": {
                         "type": "string"
+                    }
+                },
+                "request_revisions": {
+                    "description": "RequestRevisions captures the ingress request-rewrite chain: one entry\nper registered rewriter that changed the body, in application order.\nRequestBody always remains the original client request; the last\nrevision is what was forwarded downstream.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/auditlog.RequestRevisionSnapshot"
                     }
                 },
                 "response_body": {},
@@ -5334,6 +7079,125 @@ const docTemplate = `{
                 },
                 "workflow_version_id": {
                     "type": "string"
+                }
+            }
+        },
+        "auditlog.ProviderLatencySeries": {
+            "type": "object",
+            "properties": {
+                "avg_duration_ms": {
+                    "type": "array",
+                    "items": {
+                        "type": "number"
+                    }
+                },
+                "provider": {
+                    "type": "string"
+                },
+                "requests": {
+                    "type": "array",
+                    "items": {
+                        "type": "integer"
+                    }
+                }
+            }
+        },
+        "auditlog.RequestRevisionSnapshot": {
+            "type": "object",
+            "properties": {
+                "body": {
+                    "description": "Body is the request body after this revision (parsed JSON, or a string\nwhen not valid JSON). Populated only when body logging is enabled and\nthe body is within the capture limit."
+                },
+                "bytes_after": {
+                    "type": "integer"
+                },
+                "bytes_before": {
+                    "type": "integer"
+                },
+                "detail": {
+                    "description": "Detail is an optional rewriter-provided structured summary of what\nchanged (for example a compression block report)."
+                },
+                "rewriter": {
+                    "type": "string"
+                },
+                "seq": {
+                    "type": "integer"
+                },
+                "tokens_saved": {
+                    "description": "TokensSaved is the rewriter-reported estimate of prompt tokens this\nrevision saved (e.g. token compression); zero when the rewriter does\nnot report savings.",
+                    "type": "integer"
+                }
+            }
+        },
+        "auditlog.RequestStats": {
+            "type": "object",
+            "properties": {
+                "buckets": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/auditlog.RequestStatsBucket"
+                    }
+                },
+                "interval": {
+                    "type": "string"
+                },
+                "provider_latency": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/auditlog.ProviderLatencySeries"
+                    }
+                },
+                "summary": {
+                    "$ref": "#/definitions/auditlog.RequestStatsSummary"
+                }
+            }
+        },
+        "auditlog.RequestStatsBucket": {
+            "type": "object",
+            "properties": {
+                "requests": {
+                    "type": "integer"
+                },
+                "start": {
+                    "type": "string"
+                },
+                "status_2xx": {
+                    "type": "integer"
+                },
+                "status_4xx": {
+                    "type": "integer"
+                },
+                "status_5xx": {
+                    "type": "integer"
+                },
+                "status_other": {
+                    "type": "integer"
+                }
+            }
+        },
+        "auditlog.RequestStatsSummary": {
+            "type": "object",
+            "properties": {
+                "avg_duration_ms": {
+                    "type": "number"
+                },
+                "requests": {
+                    "type": "integer"
+                },
+                "status_2xx": {
+                    "type": "integer"
+                },
+                "status_4xx": {
+                    "type": "integer"
+                },
+                "status_5xx": {
+                    "type": "integer"
+                },
+                "status_other": {
+                    "type": "integer"
+                },
+                "success_rate": {
+                    "type": "number"
                 }
             }
         },
@@ -6966,6 +8830,98 @@ const docTemplate = `{
                 }
             }
         },
+        "mcpgateway.CatalogFeature": {
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                }
+            }
+        },
+        "mcpgateway.CatalogResource": {
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "uri": {
+                    "type": "string"
+                }
+            }
+        },
+        "mcpgateway.CatalogTemplate": {
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "uri_template": {
+                    "type": "string"
+                }
+            }
+        },
+        "mcpgateway.CatalogView": {
+            "type": "object",
+            "properties": {
+                "instructions": {
+                    "type": "string"
+                },
+                "prompts": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/mcpgateway.CatalogFeature"
+                    }
+                },
+                "resources": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/mcpgateway.CatalogResource"
+                    }
+                },
+                "server": {
+                    "type": "string"
+                },
+                "status": {
+                    "$ref": "#/definitions/mcpgateway.ServerStatus"
+                },
+                "templates": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/mcpgateway.CatalogTemplate"
+                    }
+                },
+                "tools": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/mcpgateway.CatalogFeature"
+                    }
+                }
+            }
+        },
+        "mcpgateway.ServerStatus": {
+            "type": "string",
+            "enum": [
+                "disabled",
+                "connecting",
+                "connected",
+                "degraded"
+            ],
+            "x-enum-varnames": [
+                "StatusDisabled",
+                "StatusConnecting",
+                "StatusConnected",
+                "StatusDegraded"
+            ]
+        },
         "pricingoverrides.Pricing": {
             "type": "object",
             "properties": {
@@ -7097,6 +9053,198 @@ const docTemplate = `{
                 }
             }
         },
+        "server.usageStatusBudget": {
+            "type": "object",
+            "properties": {
+                "amount": {
+                    "type": "number"
+                },
+                "exceeded": {
+                    "type": "boolean"
+                },
+                "period_end": {
+                    "type": "string"
+                },
+                "period_label": {
+                    "type": "string"
+                },
+                "period_seconds": {
+                    "type": "integer"
+                },
+                "period_start": {
+                    "type": "string"
+                },
+                "remaining": {
+                    "type": "number"
+                },
+                "resets_in_seconds": {
+                    "type": "integer"
+                },
+                "spent": {
+                    "type": "number"
+                },
+                "usage_ratio": {
+                    "description": "UsageRatio is spent/amount, deliberately unclamped: values above 1\nmean the budget is blown through.",
+                    "type": "number"
+                },
+                "user_path": {
+                    "type": "string"
+                }
+            }
+        },
+        "server.usageStatusRateLimit": {
+            "type": "object",
+            "properties": {
+                "exhausted": {
+                    "type": "boolean"
+                },
+                "in_flight": {
+                    "type": "integer"
+                },
+                "max_requests": {
+                    "type": "integer"
+                },
+                "max_tokens": {
+                    "type": "integer"
+                },
+                "period_label": {
+                    "type": "string"
+                },
+                "period_seconds": {
+                    "type": "integer"
+                },
+                "requests_remaining": {
+                    "type": "integer"
+                },
+                "requests_usage_ratio": {
+                    "description": "The usage ratios are used/limit per dimension, present only when that\nlimit exists and unclamped (token windows can overshoot past 1).",
+                    "type": "number"
+                },
+                "requests_used": {
+                    "type": "integer"
+                },
+                "resets_in_seconds": {
+                    "type": "integer"
+                },
+                "tokens_remaining": {
+                    "type": "integer"
+                },
+                "tokens_usage_ratio": {
+                    "type": "number"
+                },
+                "tokens_used": {
+                    "type": "integer"
+                },
+                "user_path": {
+                    "type": "string"
+                },
+                "window_end": {
+                    "type": "string"
+                },
+                "window_start": {
+                    "type": "string"
+                }
+            }
+        },
+        "server.usageStatusResponse": {
+            "type": "object",
+            "properties": {
+                "budgets": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/server.usageStatusBudget"
+                    }
+                },
+                "rate_limits": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/server.usageStatusRateLimit"
+                    }
+                },
+                "server_time": {
+                    "type": "string"
+                },
+                "usage": {
+                    "$ref": "#/definitions/server.usageStatusSummary"
+                },
+                "user_path": {
+                    "type": "string"
+                }
+            }
+        },
+        "server.usageStatusSummary": {
+            "type": "object",
+            "properties": {
+                "cache_write_input_tokens": {
+                    "type": "integer"
+                },
+                "cached_input_tokens": {
+                    "type": "integer"
+                },
+                "end_date": {
+                    "type": "string"
+                },
+                "rewrite_cost_saved": {
+                    "type": "number"
+                },
+                "rewrite_tokens_saved": {
+                    "description": "Rewrite savings: prompt tokens request rewriters removed before the\nprovider call, and the estimated input cost avoided (nil when no\nmatched row had a priced savings estimate).",
+                    "type": "integer"
+                },
+                "start_date": {
+                    "type": "string"
+                },
+                "total_cost": {
+                    "type": "number"
+                },
+                "total_input_cost": {
+                    "type": "number"
+                },
+                "total_input_tokens": {
+                    "type": "integer"
+                },
+                "total_output_cost": {
+                    "type": "number"
+                },
+                "total_output_tokens": {
+                    "type": "integer"
+                },
+                "total_requests": {
+                    "type": "integer"
+                },
+                "total_tokens": {
+                    "type": "integer"
+                },
+                "uncached_input_tokens": {
+                    "type": "integer"
+                }
+            }
+        },
+        "tagging.Rule": {
+            "type": "object",
+            "properties": {
+                "delimiter": {
+                    "description": "Delimiter splits one header value into multiple labels. Default: \",\".",
+                    "type": "string"
+                },
+                "do_not_pass": {
+                    "description": "DoNotPass strips the header before forwarding the request upstream.\nDefault: false (headers are passed through as-is).",
+                    "type": "boolean"
+                },
+                "header": {
+                    "description": "Header is the canonical HTTP header name to read labels from.",
+                    "type": "string"
+                },
+                "managed": {
+                    "description": "Managed marks a rule declared in config/env; such rules are read-only in\nthe dashboard. Never persisted.",
+                    "type": "boolean"
+                },
+                "prefix": {
+                    "description": "Prefix is optionally trimmed from the front of each label. Trimming only\naffects the extracted label, never the forwarded header value.",
+                    "type": "string"
+                }
+            }
+        },
         "usage.CacheOverview": {
             "type": "object",
             "properties": {
@@ -7205,6 +9353,38 @@ const docTemplate = `{
                 }
             }
         },
+        "usage.LabelUsage": {
+            "type": "object",
+            "properties": {
+                "input_cost": {
+                    "type": "number",
+                    "x-nullable": true
+                },
+                "input_tokens": {
+                    "type": "integer"
+                },
+                "label": {
+                    "type": "string"
+                },
+                "output_cost": {
+                    "type": "number",
+                    "x-nullable": true
+                },
+                "output_tokens": {
+                    "type": "integer"
+                },
+                "requests": {
+                    "type": "integer"
+                },
+                "total_cost": {
+                    "type": "number",
+                    "x-nullable": true
+                },
+                "total_tokens": {
+                    "type": "integer"
+                }
+            }
+        },
         "usage.ModelUsage": {
             "type": "object",
             "properties": {
@@ -7276,6 +9456,12 @@ const docTemplate = `{
                     "type": "integer"
                 },
                 "output_tokens": {
+                    "type": "integer"
+                },
+                "rewrite_cost_saved": {
+                    "type": "number"
+                },
+                "rewrite_tokens_saved": {
                     "type": "integer"
                 },
                 "total_tokens": {
@@ -7356,6 +9542,12 @@ const docTemplate = `{
                 "input_tokens": {
                     "type": "integer"
                 },
+                "labels": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
                 "model": {
                     "type": "string"
                 },
@@ -7380,6 +9572,12 @@ const docTemplate = `{
                 },
                 "request_id": {
                     "type": "string"
+                },
+                "rewrite_cost_saved": {
+                    "type": "number"
+                },
+                "rewrite_tokens_saved": {
+                    "type": "integer"
                 },
                 "timestamp": {
                     "type": "string"
@@ -7425,6 +9623,13 @@ const docTemplate = `{
                     "type": "integer"
                 },
                 "cached_input_tokens": {
+                    "type": "integer"
+                },
+                "rewrite_cost_saved": {
+                    "type": "number"
+                },
+                "rewrite_tokens_saved": {
+                    "description": "Rewrite savings: prompt tokens request rewriters removed before the\nprovider call, and the estimated input cost avoided (nil when no\nmatched row had a priced savings estimate).",
                     "type": "integer"
                 },
                 "total_cost": {
@@ -7671,7 +9876,7 @@ var SwaggerInfo = &swag.Spec{
 	BasePath:         "/",
 	Schemes:          []string{"http"},
 	Title:            "GoModel API",
-	Description:      "AI gateway routing requests to multiple LLM providers (OpenAI, Anthropic, Gemini, Groq, OpenRouter, DeepSeek, Z.ai, xAI, MiniMax, Xiaomi MiMo, OpenCode Go, Oracle, Ollama, Bailian). Drop-in OpenAI-compatible API.",
+	Description:      "AI gateway routing requests to multiple LLM providers (OpenAI, Anthropic, Gemini, Groq, Fireworks AI, Meta, OpenRouter, Kilo AI, DeepSeek, Z.ai, xAI, MiniMax, Xiaomi MiMo, OpenCode Go, Oracle, Ollama, Bailian). Drop-in OpenAI-compatible API.",
 	InfoInstanceName: "swagger",
 	SwaggerTemplate:  docTemplate,
 	LeftDelim:        "{{",

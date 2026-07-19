@@ -8,14 +8,18 @@ import (
 
 	"github.com/labstack/echo/v5"
 
-	"gomodel/internal/auditlog"
-	batchstore "gomodel/internal/batch"
-	"gomodel/internal/conversationstore"
-	"gomodel/internal/core"
-	"gomodel/internal/filestore"
-	"gomodel/internal/responsecache"
-	"gomodel/internal/responsestore"
-	"gomodel/internal/usage"
+	"github.com/enterpilot/gomodel/internal/anthropicapi"
+	"github.com/enterpilot/gomodel/internal/auditlog"
+	batchstore "github.com/enterpilot/gomodel/internal/batch"
+	"github.com/enterpilot/gomodel/internal/conversationstore"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/filestore"
+	"github.com/enterpilot/gomodel/internal/httpclient"
+	"github.com/enterpilot/gomodel/internal/mcpgateway"
+	"github.com/enterpilot/gomodel/internal/realtime"
+	"github.com/enterpilot/gomodel/internal/responsecache"
+	"github.com/enterpilot/gomodel/internal/responsestore"
+	"github.com/enterpilot/gomodel/internal/usage"
 )
 
 // Handler holds the HTTP handlers
@@ -32,6 +36,9 @@ type Handler struct {
 	logger                          auditlog.LoggerInterface
 	usageLogger                     usage.LoggerInterface
 	budgetChecker                   BudgetChecker
+	rateLimiter                     RateLimiter
+	usageSummarizer                 UsageSummarizer
+	userPathHeaderName              string
 	pricingResolver                 usage.PricingResolver
 	batchStore                      batchstore.Store
 	fileStore                       filestore.Store
@@ -42,6 +49,10 @@ type Handler struct {
 	normalizePassthroughV1Prefix bool
 	enabledPassthroughProviders  map[string]struct{}
 	realtimeEnabled              bool
+	mcpEnabled                   bool
+	mcpGateway                   *mcpgateway.Service
+	realtimeCalls                *realtime.CallRegistry
+	realtimeHTTPClient           *http.Client
 	responseCache                *responsecache.ResponseCacheMiddleware
 	guardrailsHash               string
 	storageProbe                 ReadinessProbe
@@ -51,34 +62,8 @@ type Handler struct {
 	translatedSvcOnce sync.Once
 }
 
-// NewHandler creates a new handler with the given routable provider (typically the Router)
-func NewHandler(provider core.RoutableProvider, logger auditlog.LoggerInterface, usageLogger usage.LoggerInterface, pricingResolver usage.PricingResolver) *Handler {
-	return newHandler(provider, logger, usageLogger, pricingResolver, nil, nil, nil, nil)
-}
-
-func newHandler(
-	provider core.RoutableProvider,
-	logger auditlog.LoggerInterface,
-	usageLogger usage.LoggerInterface,
-	pricingResolver usage.PricingResolver,
-	modelResolver RequestModelResolver,
-	workflowPolicyResolver RequestWorkflowPolicyResolver,
-	failoverResolver RequestFailoverResolver,
-	translatedRequestPatcher TranslatedRequestPatcher,
-) *Handler {
-	return newHandlerWithAuthorizer(
-		provider,
-		logger,
-		usageLogger,
-		pricingResolver,
-		modelResolver,
-		nil,
-		workflowPolicyResolver,
-		failoverResolver,
-		translatedRequestPatcher,
-	)
-}
-
+// newHandlerWithAuthorizer creates a new handler with the given routable
+// provider (typically the Router) and optional resolvers.
 func newHandlerWithAuthorizer(
 	provider core.RoutableProvider,
 	logger auditlog.LoggerInterface,
@@ -102,16 +87,14 @@ func newHandlerWithAuthorizer(
 		pricingResolver:          pricingResolver,
 		batchStore:               batchstore.NewMemoryStore(),
 		fileStore:                filestore.NewMemoryStore(),
-		responseStore: responsestore.NewMemoryStore(
-			responsestore.WithTTL(responsestore.DefaultMemoryStoreTTL),
-			responsestore.WithMaxEntries(responsestore.DefaultMemoryStoreMaxEntries),
-		),
-		conversationStore: conversationstore.NewMemoryStore(
-			conversationstore.WithTTL(conversationstore.DefaultMemoryStoreTTL),
-			conversationstore.WithMaxEntries(conversationstore.DefaultMemoryStoreMaxEntries),
-		),
+		// Fallback stores with default bounded retention (TTL plus entry and
+		// byte caps); app wiring replaces them with storage-backed stores.
+		responseStore:                responsestore.NewMemoryStore(),
+		conversationStore:            conversationstore.NewMemoryStore(),
 		normalizePassthroughV1Prefix: true,
 		enabledPassthroughProviders:  normalizeEnabledPassthroughProviders(defaultEnabledPassthroughProviders),
+		realtimeCalls:                realtime.NewCallRegistry(),
+		realtimeHTTPClient:           httpclient.NewDefaultHTTPClient(),
 	}
 }
 
@@ -174,6 +157,7 @@ func (h *Handler) translatedInference() *translatedInferenceService {
 			logger:                   h.logger,
 			usageLogger:              h.usageLogger,
 			budgetChecker:            h.budgetChecker,
+			rateLimiter:              h.rateLimiter,
 			pricingResolver:          h.pricingResolver,
 			responseCache:            h.responseCache,
 			guardrailsHash:           h.guardrailsHash,
@@ -204,6 +188,7 @@ func (h *Handler) nativeBatch() *nativeBatchService {
 		cleanupStoredBatchRewrittenInputFile: h.cleanupStoredBatchRewrittenInputFile,
 		usageLogger:                          h.usageLogger,
 		budgetChecker:                        h.budgetChecker,
+		rateLimiter:                          h.rateLimiter,
 		pricingResolver:                      h.pricingResolver,
 	}
 }
@@ -221,8 +206,10 @@ func (h *Handler) audio() *audioService {
 	}
 	return &audioService{
 		provider:        h.provider,
+		modelResolver:   h.modelResolver,
 		modelAuthorizer: h.modelAuthorizer,
 		budgetChecker:   h.budgetChecker,
+		rateLimiter:     h.rateLimiter,
 		logBodies:       logBodies,
 		logAudioBodies:  logAudioBodies,
 		usageLogger:     h.usageLogger,
@@ -256,11 +243,29 @@ func (h *Handler) currentResponseStore() responsestore.Store {
 func (h *Handler) realtime() *realtimeService {
 	return &realtimeService{
 		provider:        h.provider,
+		modelResolver:   h.modelResolver,
 		modelAuthorizer: h.modelAuthorizer,
 		budgetChecker:   h.budgetChecker,
+		rateLimiter:     h.rateLimiter,
 		usageLogger:     h.usageLogger,
 		pricingResolver: h.pricingResolver,
+		calls:           h.realtimeCalls,
+		httpClient:      h.realtimeHTTPClient,
 		enabled:         h.realtimeEnabled,
+	}
+}
+
+func (h *Handler) mcp() *mcpService {
+	var logBodies bool
+	if h.logger != nil {
+		logBodies = h.logger.Config().LogBodies
+	}
+	return &mcpService{
+		gateway:       h.mcpGateway,
+		budgetChecker: h.budgetChecker,
+		rateLimiter:   h.rateLimiter,
+		enabled:       h.mcpEnabled && h.mcpGateway != nil,
+		logBodies:     logBodies,
 	}
 }
 
@@ -271,6 +276,7 @@ func (h *Handler) passthrough() *passthroughService {
 		logger:                       h.logger,
 		usageLogger:                  h.usageLogger,
 		budgetChecker:                h.budgetChecker,
+		rateLimiter:                  h.rateLimiter,
 		pricingResolver:              h.pricingResolver,
 		normalizePassthroughV1Prefix: h.normalizePassthroughV1Prefix,
 		enabledPassthroughProviders:  h.enabledPassthroughProviders,
@@ -335,19 +341,109 @@ func (h *Handler) ProviderPassthrough(c *echo.Context) error {
 // Realtime handles GET /v1/realtime.
 //
 // @Summary      Open a realtime session
-// @Description  Upgrades to a websocket and relays an OpenAI-compatible realtime (speech-to-speech) session to the provider that owns the model named in the ?model= query parameter. Provider credentials are injected by the gateway.
+// @Description  Upgrades to a websocket and relays an OpenAI-compatible realtime (speech-to-speech) session to the provider that owns the model named in the ?model= query parameter. Provider credentials are injected by the gateway. Passing ?call_id= instead attaches to an existing WebRTC/SIP call as a sideband channel; calls created through this gateway instance are routed automatically, others need explicit model (and provider) parameters.
 // @Tags         realtime
 // @Security     BearerAuth
-// @Param        model     query     string  true   "Model that owns the realtime session"
+// @Param        model     query     string  false  "Model that owns the realtime session (required unless call_id names a call created through this gateway instance)"
 // @Param        provider  query     string  false  "Optional provider hint"
+// @Param        call_id   query     string  false  "Existing WebRTC/SIP call to attach to as a sideband channel"
 // @Success      101       {string}  string  "Switching Protocols"
 // @Failure      400       {object}  core.OpenAIErrorEnvelope
 // @Failure      401       {object}  core.OpenAIErrorEnvelope
+// @Failure      404       {object}  core.OpenAIErrorEnvelope
+// @Failure      429       {object}  core.OpenAIErrorEnvelope
 // @Failure      501       {object}  core.OpenAIErrorEnvelope
 // @Failure      502       {object}  core.OpenAIErrorEnvelope
 // @Router       /v1/realtime [get]
 func (h *Handler) Realtime(c *echo.Context) error {
 	return h.realtime().Realtime(c)
+}
+
+// MCP handles the aggregated MCP endpoint at /mcp.
+//
+// @Summary      MCP gateway (aggregated)
+// @Description  Streamable-HTTP MCP endpoint aggregating every configured upstream MCP server visible to the caller. Tools and prompts are namespaced as {slug}_{name}. POST carries JSON-RPC messages, GET opens the server-notification SSE stream, DELETE ends the session. The X-MCP-Servers request header optionally narrows the visible servers to a comma-separated subset of server slugs.
+// @Tags         mcp
+// @Accept       json
+// @Produce      json
+// @Produce      text/event-stream
+// @Security     BearerAuth
+// @Success      200  {object}  map[string]interface{}  "JSON-RPC response or SSE stream"
+// @Failure      401  {object}  core.OpenAIErrorEnvelope
+// @Failure      429  {object}  core.OpenAIErrorEnvelope
+// @Failure      501  {object}  core.OpenAIErrorEnvelope
+// @Router       /mcp [post]
+// @Router       /mcp [get]
+// @Router       /mcp [delete]
+func (h *Handler) MCP(c *echo.Context) error {
+	return h.mcp().handle(c, "")
+}
+
+// MCPServer handles the per-server MCP endpoints at /mcp/{server}.
+//
+// @Summary      MCP gateway (single server)
+// @Description  Streamable-HTTP MCP endpoint exposing one configured upstream MCP server with original (un-prefixed) tool names.
+// @Tags         mcp
+// @Accept       json
+// @Produce      json
+// @Produce      text/event-stream
+// @Security     BearerAuth
+// @Param        server  path      string  true  "Configured MCP server slug"
+// @Success      200     {object}  map[string]interface{}  "JSON-RPC response or SSE stream"
+// @Failure      401     {object}  core.OpenAIErrorEnvelope
+// @Failure      404     {object}  core.OpenAIErrorEnvelope
+// @Failure      429     {object}  core.OpenAIErrorEnvelope
+// @Failure      501     {object}  core.OpenAIErrorEnvelope
+// @Router       /mcp/{server} [post]
+// @Router       /mcp/{server} [get]
+// @Router       /mcp/{server} [delete]
+func (h *Handler) MCPServer(c *echo.Context) error {
+	return h.mcp().handle(c, c.Param("server"))
+}
+
+// RealtimeCalls handles POST /v1/realtime/calls.
+//
+// @Summary      Create a realtime WebRTC call
+// @Description  OpenAI-compatible WebRTC SDP exchange. Accepts a raw application/sdp offer with the model in the ?model= query parameter, or a multipart form with sdp and session (JSON) fields. The gateway routes by model, injects provider credentials, and relays the SDP answer; the Location header carries the created call id. Media flows directly between the client and the provider, so usage is recorded by a gateway-side sideband observer when usage tracking is enabled.
+// @Tags         realtime
+// @Accept       application/sdp
+// @Accept       mpfd
+// @Produce      application/sdp
+// @Produce      json
+// @Security     BearerAuth
+// @Param        model     query     string  false  "Model that owns the call (required for application/sdp offers)"
+// @Param        provider  query     string  false  "Optional provider hint"
+// @Param        request   body      string  true   "SDP offer (raw application/sdp body), or a multipart form with sdp and session (JSON) fields"
+// @Success      201       {string}  string  "SDP answer"
+// @Failure      400       {object}  core.OpenAIErrorEnvelope
+// @Failure      401       {object}  core.OpenAIErrorEnvelope
+// @Failure      429       {object}  core.OpenAIErrorEnvelope
+// @Failure      501       {object}  core.OpenAIErrorEnvelope
+// @Failure      502       {object}  core.OpenAIErrorEnvelope
+// @Router       /v1/realtime/calls [post]
+func (h *Handler) RealtimeCalls(c *echo.Context) error {
+	return h.realtime().RealtimeCalls(c)
+}
+
+// RealtimeClientSecrets handles POST /v1/realtime/client_secrets.
+//
+// @Summary      Mint an ephemeral realtime client secret
+// @Description  OpenAI-compatible ephemeral credential minting for browser and mobile realtime clients. Routes by session.model (or the transcription model for transcription sessions), applies the same model-access, budget, and rate-limit gates as other model endpoints, and relays the provider response verbatim. The minted secret authenticates the client directly against the provider, bypassing the gateway for the session itself.
+// @Tags         realtime
+// @Accept       json
+// @Produce      json
+// @Security     BearerAuth
+// @Param        provider  query     string  false  "Optional provider hint"
+// @Param        request   body      object{session=object,expires_after=object}  true  "Client secret request: session config with the routing model (session.model, or the nested transcription model) plus optional expires_after; additional fields are relayed verbatim"
+// @Success      200       {object}  map[string]any  "Provider client secret response"
+// @Failure      400       {object}  core.OpenAIErrorEnvelope
+// @Failure      401       {object}  core.OpenAIErrorEnvelope
+// @Failure      429       {object}  core.OpenAIErrorEnvelope
+// @Failure      501       {object}  core.OpenAIErrorEnvelope
+// @Failure      502       {object}  core.OpenAIErrorEnvelope
+// @Router       /v1/realtime/client_secrets [post]
+func (h *Handler) RealtimeClientSecrets(c *echo.Context) error {
+	return h.realtime().RealtimeClientSecrets(c)
 }
 
 // ChatCompletion handles POST /v1/chat/completions
@@ -444,6 +540,17 @@ func (h *Handler) ListModels(c *echo.Context) error {
 			}
 			resp = mergeExposedModelsResponse(resp, exposed)
 		}
+	}
+
+	// The models route is shared by both wire dialects. Anthropic SDK clients
+	// are identified by the anthropic-version header they always send; render
+	// the Anthropic list shape for them, the OpenAI shape for everyone else.
+	if c.Request().Header.Get("anthropic-version") != "" {
+		var models []core.Model
+		if resp != nil {
+			models = resp.Data
+		}
+		return c.JSON(http.StatusOK, anthropicapi.FromModels(models))
 	}
 
 	return c.JSON(http.StatusOK, resp)

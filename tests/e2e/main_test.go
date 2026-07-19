@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"gomodel/internal/core"
-	"gomodel/internal/providers"
-	"gomodel/internal/server"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/providers"
+	"github.com/enterpilot/gomodel/internal/server"
 )
 
 var (
@@ -110,7 +110,7 @@ func cleanup() {
 // waitForServer waits for the server to become healthy.
 func waitForServer(healthURL string) error {
 	client := &http.Client{Timeout: 2 * time.Second}
-	for i := 0; i < 30; i++ {
+	for range 30 {
 		resp, err := client.Get(healthURL)
 		if err == nil {
 			_ = resp.Body.Close()

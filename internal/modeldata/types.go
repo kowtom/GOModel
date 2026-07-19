@@ -3,9 +3,10 @@
 package modeldata
 
 import (
+	"slices"
 	"strings"
 
-	"gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/core"
 )
 
 // ModelList represents the top-level structure of models.json.
@@ -75,10 +76,8 @@ func (l *ModelList) addAliasTarget(alias string, target aliasTarget) {
 		return
 	}
 	existing := l.aliasTargetsByID[alias]
-	for _, candidate := range existing {
-		if candidate == target {
-			return
-		}
+	if slices.Contains(existing, target) {
+		return
 	}
 	l.aliasTargetsByID[alias] = append(existing, target)
 }

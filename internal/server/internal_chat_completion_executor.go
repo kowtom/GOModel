@@ -11,13 +11,12 @@ import (
 	"github.com/goccy/go-json"
 
 	"github.com/google/uuid"
-	"github.com/labstack/echo/v5"
 
-	"gomodel/internal/auditlog"
-	"gomodel/internal/core"
-	"gomodel/internal/gateway"
-	"gomodel/internal/responsecache"
-	"gomodel/internal/usage"
+	"github.com/enterpilot/gomodel/internal/auditlog"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/gateway"
+	"github.com/enterpilot/gomodel/internal/responsecache"
+	"github.com/enterpilot/gomodel/internal/usage"
 )
 
 // InternalChatCompletionExecutorConfig configures the transport-free translated
@@ -147,16 +146,22 @@ func (e *InternalChatCompletionExecutor) executeChatCompletion(
 		failoverModel string
 		usedFailover  bool
 	)
-	result, err := e.responseCache.HandleInternalRequest(ctx, http.MethodPost, "/v1/chat/completions", body, func(c *echo.Context) error {
+	result, err := e.responseCache.HandleInternalRequest(ctx, http.MethodPost, "/v1/chat/completions", body, func(callCtx context.Context) (*responsecache.InternalResponse, error) {
 		var execErr error
-		resp, providerType, providerName, failoverModel, usedFailover, execErr = e.orchestrator.DispatchChatCompletion(c.Request().Context(), workflow, req)
+		resp, providerType, providerName, failoverModel, usedFailover, execErr = e.orchestrator.DispatchChatCompletion(callCtx, workflow, req)
 		if execErr != nil {
-			return execErr
+			return nil, execErr
 		}
-		if usedFailover {
-			c.SetRequest(c.Request().WithContext(core.WithFailoverUsed(c.Request().Context())))
+		respBody, marshalErr := json.Marshal(resp)
+		if marshalErr != nil {
+			return nil, marshalErr
 		}
-		return c.JSON(http.StatusOK, resp)
+		return &responsecache.InternalResponse{
+			StatusCode:   http.StatusOK,
+			ContentType:  "application/json",
+			Body:         respBody,
+			FailoverUsed: usedFailover,
+		}, nil
 	})
 	if err != nil {
 		return nil, "", "", "", false, "", err

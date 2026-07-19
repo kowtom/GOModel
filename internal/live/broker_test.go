@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"gomodel/internal/auditlog"
-	"gomodel/internal/usage"
+	"github.com/enterpilot/gomodel/internal/auditlog"
+	"github.com/enterpilot/gomodel/internal/usage"
 )
 
 func TestBrokerPublishesAndReplaysBySequence(t *testing.T) {
@@ -266,7 +266,7 @@ func TestBrokerStaleCursorReceivesResetAndActiveSnapshots(t *testing.T) {
 	b := NewBroker(Config{Enabled: true, BufferSize: 1, ReplayLimit: 1})
 	now := time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC)
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		b.PublishAuditEvent(EventAuditUpdated, &auditlog.LogEntry{
 			ID:        "audit-1",
 			RequestID: "req-1",
@@ -293,7 +293,7 @@ func TestBrokerStaleCursorReceivesResetAndActiveSnapshots(t *testing.T) {
 
 func TestBrokerSignalsResetWhenCursorFallsOutOfReplayWindow(t *testing.T) {
 	b := NewBroker(Config{Enabled: true, BufferSize: 1, ReplayLimit: 1})
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		b.PublishAuditEvent(EventAuditStarted, &auditlog.LogEntry{
 			ID:        "audit",
 			RequestID: "req",
@@ -315,7 +315,7 @@ func TestBrokerSignalsResetWhenReplayGapExceedsLimit(t *testing.T) {
 	b := NewBroker(Config{Enabled: true, BufferSize: 10, ReplayLimit: 2})
 	now := time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC)
 
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		b.PublishAuditEvent(EventAuditUpdated, &auditlog.LogEntry{
 			ID:             "audit-1",
 			RequestID:      "req-1",
@@ -376,7 +376,7 @@ func TestBrokerDropsSlowSubscribers(t *testing.T) {
 	}
 	defer sub.Close()
 
-	for i := 0; i < 4; i++ {
+	for range 4 {
 		b.PublishAuditEvent(EventAuditUpdated, &auditlog.LogEntry{
 			ID:        "audit",
 			RequestID: "req",
@@ -528,6 +528,12 @@ func TestBrokerAuditActiveSnapshotMergesNestedPreviewData(t *testing.T) {
 
 func TestBrokerAuditUpdatedPreviewIncludesRequestBodyOnly(t *testing.T) {
 	b := NewBroker(Config{Enabled: true})
+	sub := b.Subscribe(0)
+	if sub == nil {
+		t.Fatal("Subscribe returned nil")
+	}
+	defer sub.Close()
+
 	b.PublishAuditEvent(EventAuditUpdated, &auditlog.LogEntry{
 		ID:         "audit-1",
 		RequestID:  "req-1",
@@ -540,16 +546,9 @@ func TestBrokerAuditUpdatedPreviewIncludesRequestBodyOnly(t *testing.T) {
 			ResponseBody:    map[string]any{"id": "chatcmpl-test"},
 		},
 	})
-	sub := b.Subscribe(0)
-	if sub == nil {
-		t.Fatal("Subscribe returned nil")
-	}
-	defer sub.Close()
 
-	var payload map[string]any
-	if err := json.Unmarshal(b.events[0].Data, &payload); err != nil {
-		t.Fatalf("unmarshal preview: %v", err)
-	}
+	// Connected subscribers receive the request body live.
+	payload := eventPayload(t, <-sub.Events)
 	data, ok := payload["data"].(map[string]any)
 	if !ok {
 		t.Fatalf("preview data = %T, want object", payload["data"])
@@ -563,10 +562,32 @@ func TestBrokerAuditUpdatedPreviewIncludesRequestBodyOnly(t *testing.T) {
 	if _, ok := data["response_body"]; ok {
 		t.Fatal("updated preview data contains response body")
 	}
+
+	// The replay ring retains the preview without the body, flagged as captured.
+	retained := eventPayload(t, b.events[0])
+	retainedData, ok := retained["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("retained preview data = %T, want object", retained["data"])
+	}
+	if _, ok := retainedData["request_body"]; ok {
+		t.Fatal("retained preview contains request body")
+	}
+	if retainedData["request_body_captured"] != true {
+		t.Fatalf("request_body_captured = %#v, want true", retainedData["request_body_captured"])
+	}
+	if headers, ok := retainedData["request_headers"].(map[string]any); !ok || headers["Authorization"] != "[REDACTED]" {
+		t.Fatalf("retained request_headers = %#v, want redacted authorization", retainedData["request_headers"])
+	}
 }
 
 func TestBrokerAuditCompletedPreviewIncludesCapturedDetailData(t *testing.T) {
 	b := NewBroker(Config{Enabled: true})
+	sub := b.Subscribe(0)
+	if sub == nil {
+		t.Fatal("Subscribe returned nil")
+	}
+	defer sub.Close()
+
 	entry := &auditlog.LogEntry{
 		ID:         "audit-1",
 		RequestID:  "req-1",
@@ -587,7 +608,9 @@ func TestBrokerAuditCompletedPreviewIncludesCapturedDetailData(t *testing.T) {
 	entry.Data.ResponseBody.(map[string]any)["id"] = "changed"
 	entry.Data.ResponseBody.(map[string]any)["usage"].(map[string]any)["total_tokens"] = 999
 
-	payload := eventPayload(t, b.events[0])
+	// Connected subscribers receive the full captured detail, decoupled from
+	// later entry mutations.
+	payload := eventPayload(t, <-sub.Events)
 	data, ok := payload["data"].(map[string]any)
 	if !ok {
 		t.Fatalf("preview data = %T, want object", payload["data"])
@@ -609,6 +632,26 @@ func TestBrokerAuditCompletedPreviewIncludesCapturedDetailData(t *testing.T) {
 	}
 	if body := data["response_body"].(map[string]any); body["usage"].(map[string]any)["total_tokens"] != float64(150) {
 		t.Fatalf("response_body usage = %#v, want original usage", body["usage"])
+	}
+
+	// The replay ring keeps the detail without bodies, flagged as captured.
+	retained := eventPayload(t, b.events[0])
+	retainedData, ok := retained["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("retained preview data = %T, want object", retained["data"])
+	}
+	if _, ok := retainedData["request_body"]; ok {
+		t.Fatal("retained preview contains request body")
+	}
+	if _, ok := retainedData["response_body"]; ok {
+		t.Fatal("retained preview contains response body")
+	}
+	if retainedData["request_body_captured"] != true || retainedData["response_body_captured"] != true {
+		t.Fatalf("captured flags = %#v/%#v, want true/true",
+			retainedData["request_body_captured"], retainedData["response_body_captured"])
+	}
+	if headers, ok := retainedData["response_headers"].(map[string]any); !ok || headers["X-Request-ID"] != "req-1" {
+		t.Fatalf("retained response_headers = %#v, want x-request-id", retainedData["response_headers"])
 	}
 }
 
@@ -745,6 +788,175 @@ func TestUsagePreviewIncludesRawData(t *testing.T) {
 	}
 }
 
+func TestBrokerRingCapacityBoundedByReplayWindow(t *testing.T) {
+	b := NewBroker(Config{Enabled: true, BufferSize: 10000, ReplayLimit: 100})
+	if b.bufferSize != 101 {
+		t.Fatalf("bufferSize = %d, want 101 (replay limit + 1)", b.bufferSize)
+	}
+
+	// A buffer smaller than the replay window is kept as configured.
+	b = NewBroker(Config{Enabled: true, BufferSize: 50, ReplayLimit: 100})
+	if b.bufferSize != 50 {
+		t.Fatalf("bufferSize = %d, want 50", b.bufferSize)
+	}
+}
+
+func TestBrokerActiveSnapshotsExcludeBodiesForFreshSubscribers(t *testing.T) {
+	b := NewBroker(Config{Enabled: true})
+	b.PublishAuditEvent(EventAuditUpdated, &auditlog.LogEntry{
+		ID:        "audit-1",
+		RequestID: "req-1",
+		Timestamp: time.Now(),
+		Data: &auditlog.LogData{
+			RequestBody: map[string]any{"model": "gpt-test"},
+		},
+	})
+
+	sub := b.Subscribe(0)
+	if sub == nil {
+		t.Fatal("Subscribe returned nil")
+	}
+	defer sub.Close()
+
+	if len(sub.Replay) != 1 {
+		t.Fatalf("replay len = %d, want 1", len(sub.Replay))
+	}
+	data, ok := eventPayload(t, sub.Replay[0])["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("snapshot data missing")
+	}
+	if _, ok := data["request_body"]; ok {
+		t.Fatal("active snapshot contains request body")
+	}
+	if data["request_body_captured"] != true {
+		t.Fatalf("request_body_captured = %#v, want true", data["request_body_captured"])
+	}
+}
+
+func TestBrokerCompactsOversizedRetainedEvents(t *testing.T) {
+	b := NewBroker(Config{Enabled: true})
+	oversized := make(map[string]string, 1)
+	headerValue := make([]byte, maxRetainedEventBytes)
+	for i := range headerValue {
+		headerValue[i] = 'x'
+	}
+	oversized["X-Big"] = string(headerValue)
+	b.PublishAuditEvent(EventAuditCompleted, &auditlog.LogEntry{
+		ID:        "audit-1",
+		RequestID: "req-1",
+		Timestamp: time.Now(),
+		Data: &auditlog.LogData{
+			RequestHeaders: oversized,
+			RequestBody:    map[string]any{"model": "gpt-test"},
+		},
+	})
+
+	retained := b.events[0]
+	if len(retained.Data) > maxRetainedEventBytes {
+		t.Fatalf("retained event size = %d, want <= %d", len(retained.Data), maxRetainedEventBytes)
+	}
+	data, ok := eventPayload(t, retained)["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("compacted data missing")
+	}
+	if _, ok := data["request_headers"]; ok {
+		t.Fatal("compacted event still contains oversized headers")
+	}
+	if data["request_body_captured"] != true {
+		t.Fatalf("request_body_captured = %#v, want true", data["request_body_captured"])
+	}
+}
+
+func TestBrokerAuditStreamPreviewCarriesPartialResponseBody(t *testing.T) {
+	b := NewBroker(Config{Enabled: true})
+	sub := b.Subscribe(0)
+	if sub == nil {
+		t.Fatal("Subscribe returned nil")
+	}
+	defer sub.Close()
+
+	b.PublishAuditEvent(EventAuditStream, &auditlog.LogEntry{
+		ID:         "audit-1",
+		RequestID:  "req-1",
+		Timestamp:  time.Now(),
+		StatusCode: 200,
+		Stream:     true,
+		Data: &auditlog.LogData{
+			ResponseBody: map[string]any{
+				"object": "chat.completion",
+				"choices": []any{map[string]any{
+					"index":   0,
+					"message": map[string]any{"role": "assistant", "content": "partial"},
+				}},
+			},
+		},
+	})
+
+	// Connected subscribers receive the partial body, flagged as partial and
+	// still pending.
+	payload := eventPayload(t, <-sub.Events)
+	if payload["_live_state"] != EventAuditStream {
+		t.Fatalf("_live_state = %#v, want %q", payload["_live_state"], EventAuditStream)
+	}
+	if payload["_live_pending"] != true {
+		t.Fatalf("_live_pending = %#v, want true", payload["_live_pending"])
+	}
+	data, ok := payload["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("preview data = %T, want object", payload["data"])
+	}
+	if _, ok := data["response_body"].(map[string]any); !ok {
+		t.Fatalf("response_body = %#v, want partial body", data["response_body"])
+	}
+	if data["response_body_partial"] != true {
+		t.Fatalf("response_body_partial = %#v, want true", data["response_body_partial"])
+	}
+
+	// The replay ring drops the partial body without claiming it was captured
+	// (it is not in the persisted entry yet) and without the partial flag,
+	// which would go stale in merged active snapshots.
+	retained := eventPayload(t, b.events[0])
+	retainedData, ok := retained["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("retained preview data = %T, want object", retained["data"])
+	}
+	if _, ok := retainedData["response_body"]; ok {
+		t.Fatal("retained preview contains partial response body")
+	}
+	if _, ok := retainedData["response_body_captured"]; ok {
+		t.Fatal("retained preview claims a partial body was captured")
+	}
+	if _, ok := retainedData["response_body_partial"]; ok {
+		t.Fatal("retained preview keeps the partial flag")
+	}
+}
+
+func TestBrokerHasLiveSubscribers(t *testing.T) {
+	var nilBroker *Broker
+	if nilBroker.HasLiveSubscribers() {
+		t.Fatal("nil broker reports subscribers")
+	}
+	if NewBroker(Config{}).HasLiveSubscribers() {
+		t.Fatal("disabled broker reports subscribers")
+	}
+
+	b := NewBroker(Config{Enabled: true})
+	if b.HasLiveSubscribers() {
+		t.Fatal("fresh broker reports subscribers")
+	}
+	sub := b.Subscribe(0)
+	if sub == nil {
+		t.Fatal("Subscribe returned nil")
+	}
+	if !b.HasLiveSubscribers() {
+		t.Fatal("broker with a subscription reports none")
+	}
+	sub.Close()
+	if b.HasLiveSubscribers() {
+		t.Fatal("broker reports subscribers after unsubscribe")
+	}
+}
+
 func eventPayload(t *testing.T, event Event) map[string]any {
 	t.Helper()
 	var payload map[string]any
@@ -765,7 +977,7 @@ func BenchmarkBrokerPublishSteadyState(b *testing.B) {
 		Model:     "gpt-test",
 		Provider:  "openai",
 	}
-	for i := 0; i < 10001; i++ {
+	for range 10001 {
 		broker.PublishUsageEvent(EventUsageFlushed, entry)
 	}
 
@@ -785,7 +997,7 @@ func TestBrokerReplayAfterBufferWrap(t *testing.T) {
 
 	// Publish 6 usage-flushed events (seq 1..6); the buffer retains seq 3..6
 	// with the ring head pointing mid-slice.
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		b.PublishUsageEvent(EventUsageFlushed, &usage.UsageEntry{
 			ID:        "usage-wrap",
 			RequestID: "req-wrap",

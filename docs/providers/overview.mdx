@@ -25,18 +25,23 @@ support, not every individual model capability exposed by an upstream provider.
 | Google Vertex AI | `VERTEX_PROJECT` + `VERTEX_LOCATION` + GCP credentials | `google/gemini-2.5-flash` | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | [Google Vertex AI](/providers/vertex) |
 | DeepSeek | `DEEPSEEK_API_KEY` | `deepseek-v4-pro` | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | [DeepSeek](/providers/deepseek) |
 | Groq | `GROQ_API_KEY` | `llama-3.3-70b-versatile` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | — |
+| Fireworks AI | `FIREWORKS_API_KEY` (`FIREWORKS_BASE_URL` optional) | `accounts/fireworks/models/gpt-oss-120b` | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | — |
+| Meta (Muse Spark) | `META_API_KEY` (`META_BASE_URL` optional) | `muse-spark-1.1` | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | — |
 | OpenRouter | `OPENROUTER_API_KEY` | `google/gemini-2.5-flash` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+| Kilo AI | `KILO_API_KEY` (`KILO_BASE_URL` optional) | `anthropic/claude-sonnet-4.5` | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | — |
 | Z.ai | `ZAI_API_KEY` (`ZAI_BASE_URL` optional) | `glm-5.1` | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | — |
-| xAI (Grok) | `XAI_API_KEY` | `grok-4` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | — |
+| xAI (Grok) | `XAI_API_KEY` | `grok-4.5` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | [xAI (Grok)](/providers/xai) |
 | Alibaba Cloud Model Studio (Bailian) | `BAILIAN_API_KEY` (`BAILIAN_BASE_URL` optional) | `qwen3-max` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | [Alibaba Cloud Model Studio](/providers/bailian) |
 | MiniMax | `MINIMAX_API_KEY` (`MINIMAX_BASE_URL` optional) | `MiniMax-M3` | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | — |
 | Xiaomi MiMo | `XIAOMI_API_KEY` (`XIAOMI_BASE_URL` optional) | `mimo-v2.5-pro` | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | [Xiaomi MiMo](/providers/xiaomi) |
 | OpenCode Go | `OPENCODE_GO_API_KEY` (`OPENCODE_GO_BASE_URL` optional) | `glm-5.1` | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | [OpenCode Go](/providers/opencode-go) |
+| Kimi Code | `KIMICODE_API_KEY` | `kimi-for-coding` | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | [Kimi Code](/providers/kimicode) |
 | Azure OpenAI | `AZURE_API_KEY` + `AZURE_BASE_URL` (`AZURE_API_VERSION` optional) | `gpt-5` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | [Azure OpenAI](/providers/azure) |
 | Oracle GenAI | `ORACLE_API_KEY` + `ORACLE_BASE_URL` | `openai.gpt-oss-120b` | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | [Oracle GenAI](/providers/oracle) |
 | Ollama | `OLLAMA_BASE_URL` | `llama3.2` | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | [Ollama](/providers/multiple-ollama) |
 | vLLM | `VLLM_BASE_URL` (`VLLM_API_KEY` optional) | `meta-llama/Llama-3.1-8B-Instruct` | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | [vLLM](/providers/vllm) |
 | Amazon Bedrock | `BEDROCK_BASE_URL` (region or endpoint) + AWS credentials | `anthropic.claude-3-5-haiku-20241022-v1:0` | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | [Amazon Bedrock](/providers/bedrock) |
+| Amazon Bedrock Mantle | `BEDROCK_MANTLE_API_KEY` or AWS credentials | `openai.gpt-5.6-sol` | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | [Bedrock Mantle](/providers/bedrock-mantle) |
 
 ✅ Supported ❌ Unsupported
 
@@ -44,6 +49,23 @@ support, not every individual model capability exposed by an upstream provider.
 
 - **Z.ai GLM Coding Plan** — set
   `ZAI_BASE_URL=https://api.z.ai/api/coding/paas/v4`.
+- **Amazon Bedrock Mantle** — GPT-5.6 Sol, Terra, and Luna accept only the
+  Responses API on Mantle. GoModel sends `/v1/responses` requests directly to
+  AWS and selects the required `/openai/v1/responses` upstream path.
+- **Fireworks AI** — model IDs are account-scoped paths such as
+  `accounts/fireworks/models/gpt-oss-120b`; use them verbatim in requests and
+  in `FIREWORKS_MODELS`.
+- **Meta (Muse Spark)** — the Meta Model API is OpenAI-compatible; set
+  `META_API_KEY` and route to `muse-spark-1.1`. Muse Spark models are not in
+  the upstream model catalog yet, so declare `context_window` and `pricing`
+  under `providers.meta.models` metadata in `config.yaml` if you want cost
+  tracking and context-window reporting.
+- **Kilo AI** — model IDs use `provider/model` (for example,
+  `anthropic/claude-sonnet-4.5`) and are forwarded unchanged. GoModel serves
+  `/v1/responses` by translating it to Kilo's chat-completions endpoint. If
+  another configured provider exposes the same raw model ID, select Kilo
+  explicitly with `kilo/anthropic/claude-sonnet-4.5`; GoModel removes only the
+  outer `kilo/` routing qualifier before forwarding.
 - **Xiaomi MiMo** — TTS (`mimo-v2.5-tts*`) and ASR (`mimo-v2.5-asr`) are served
   through `/v1/audio/speech` and `/v1/audio/transcriptions` (translated to
   MiMo's chat-completions audio dialect) as well as directly via chat
@@ -54,6 +76,10 @@ support, not every individual model capability exposed by an upstream provider.
   `qwen3.7-max`, override with `OPENCODE_GO_MESSAGES_MODELS`) are sent to the
   Anthropic-native endpoint. Set `OPENCODE_GO_API_KEY`; the base URL defaults to
   `https://opencode.ai/zen/go/v1`.
+- **Kimi Code** — no per-token pricing; quota refreshes weekly and is also
+  constrained by a rolling 5-hour window. Usage-cost tracking reports zero for
+  Kimi Code, so `cost` load-balancing cannot price it; prefer conservative
+  retry strategies.
 - **Configured model lists** — available for every provider with
   `<PROVIDER>_MODELS`, for example
   `OPENROUTER_MODELS=openai/gpt-oss-120b,anthropic/claude-sonnet-4` or
@@ -66,6 +92,10 @@ support, not every individual model capability exposed by an upstream provider.
   for providers that define a list, skipping their upstream `/models` calls.
 - **vLLM** — set `VLLM_API_KEY` only if the upstream server was started with
   `--api-key`.
+- **Multiple API keys for one provider** — set `OPENAI_API_KEY_2`,
+  `OPENAI_API_KEY_3`, and so on to spread requests across keys round robin and
+  lift per-key rate limits. This costs you provider prompt caching; see
+  [API key rotation](/providers/key-rotation).
 - **Multiple instances of one provider type** — without `config.yaml`, use
   suffixed env vars such as `OPENAI_EAST_API_KEY` and `OPENAI_EAST_BASE_URL`;
   add `OPENAI_EAST_MODELS` to configure that instance's model list. This
@@ -110,7 +140,57 @@ These are the providers most users hit friction on:
   same file for both Docker and the native binary.
 </Tip>
 
-Providers without a dedicated page (OpenAI, Groq, OpenRouter, Z.ai,
-xAI, MiniMax) follow the same pattern: set the API key (and optional base URL
-where supported), start GoModel, route by model ID. The full env-var reference
+Providers without a dedicated page (OpenAI, Groq, Fireworks AI, Meta,
+OpenRouter, Kilo AI, Z.ai, xAI, MiniMax) follow the same pattern: set the API key (and
+optional base URL where supported), start GoModel, route by model ID. The full env-var reference
 lives in [Configuration](/advanced/configuration).
+
+## Provider status
+
+The admin dashboard (`/admin/dashboard`) shows live status for every
+configured provider in the **Providers Overview** section of the
+**Overview** page.
+
+<img
+  src="/providers/provider-status.png"
+  alt="GoModel dashboard Providers Overview with a Degraded openai card showing a failing model and a Healthy vllm card"
+  style={{ width: "100%", maxWidth: "1280px", height: "auto" }}
+  className="rounded-lg"
+/>
+
+Each card's status pill combines two signals — **model discovery** (can the
+provider's model inventory be fetched?) and **request health** (are real
+requests through the gateway succeeding?). Real-traffic signals only ever
+worsen a status, never mask a discovery failure. Hover over the pill for the
+classification reason and the most recent error.
+
+| Pill | Meaning |
+| ---- | ------- |
+| `Healthy` | Model discovery succeeded and recent traffic (if any) looks fine |
+| `Starting` | Configured and awaiting first model discovery |
+| `Configured` | Configured but no models exposed yet |
+| `Degraded` | The latest refresh failed (previous inventory still serves), **or** a specific model's recent requests keep failing |
+| `Recovering` | The circuit breaker is half-open and probing whether the provider recovered |
+| `Circuit Open` | The circuit breaker is open; traffic to the provider is paused |
+| `Unhealthy` | Model discovery failed and no models are available |
+
+Expand a card (the arrow strip at the bottom, or the section-wide
+**Show Details** switch) to see request health details:
+
+- **Recent Requests** — requests and errors through the gateway in the last
+  10 minutes.
+- **Breaker State** — the provider's live circuit-breaker state
+  (see [Resilience](/advanced/resilience#circuit-breaker-and-dashboard-provider-health)).
+- **Models (Recent Traffic)** — per-model request/error counts. A model with
+  at least 3 errors making up half or more of its windowed requests is
+  flagged in red — this catches a single broken model on an otherwise
+  healthy provider, which model discovery alone cannot see. Hover a row for
+  the model's latest error message.
+
+Request-health tracking is passive: it observes traffic your clients already
+send (the gateway's own background probes — model discovery and availability
+checks — are excluded), so an idle provider simply shows no recent requests. Counters are in-memory per gateway instance and
+reset on restart.
+
+The same data is available as JSON from `GET /admin/providers/status` for
+scripting and external monitoring.

@@ -8,7 +8,7 @@ import (
 
 	"github.com/goccy/go-json"
 
-	"gomodel/internal/cache"
+	"github.com/enterpilot/gomodel/internal/cache"
 )
 
 const (
@@ -54,17 +54,6 @@ func NewRedisModelCache(cfg RedisModelCacheConfig) (Cache, error) {
 	}
 	slog.Info("redis model cache connected", "key", key, "ttl", ttl)
 	return &redisModelCache{store: store, key: key, ttl: ttl, owned: true}, nil
-}
-
-// NewRedisModelCacheWithStore creates a Cache from an existing Store (for testing).
-func NewRedisModelCacheWithStore(store cache.Store, key string, ttl time.Duration) Cache {
-	if key == "" {
-		key = DefaultRedisKey
-	}
-	if ttl == 0 {
-		ttl = cache.DefaultRedisTTL
-	}
-	return &redisModelCache{store: store, key: key, ttl: ttl, owned: false}
 }
 
 type redisModelCache struct {

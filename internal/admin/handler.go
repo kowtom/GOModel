@@ -13,19 +13,21 @@ import (
 
 	"github.com/labstack/echo/v5"
 
-	"gomodel/internal/auditlog"
-	"gomodel/internal/authkeys"
-	"gomodel/internal/budget"
-	"gomodel/internal/core"
-	"gomodel/internal/failover"
-	"gomodel/internal/guardrails"
-	"gomodel/internal/live"
-	"gomodel/internal/pricingoverrides"
-	"gomodel/internal/providers"
-	"gomodel/internal/tagging"
-	"gomodel/internal/usage"
-	"gomodel/internal/virtualmodels"
-	"gomodel/internal/workflows"
+	"github.com/enterpilot/gomodel/internal/auditlog"
+	"github.com/enterpilot/gomodel/internal/authkeys"
+	"github.com/enterpilot/gomodel/internal/budget"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/failover"
+	"github.com/enterpilot/gomodel/internal/guardrails"
+	"github.com/enterpilot/gomodel/internal/live"
+	"github.com/enterpilot/gomodel/internal/pricingoverrides"
+	"github.com/enterpilot/gomodel/internal/providers"
+	"github.com/enterpilot/gomodel/internal/providers/health"
+	"github.com/enterpilot/gomodel/internal/ratelimit"
+	"github.com/enterpilot/gomodel/internal/tagging"
+	"github.com/enterpilot/gomodel/internal/usage"
+	"github.com/enterpilot/gomodel/internal/virtualmodels"
+	"github.com/enterpilot/gomodel/internal/workflows"
 )
 
 // Handler serves admin API endpoints.
@@ -37,10 +39,12 @@ type Handler struct {
 	pricingResolver     usage.PricingResolver
 	authKeys            *authkeys.Service
 	virtualModels       *virtualmodels.Service
+	mcpServers          MCPServerAdmin
 	failoverRules       *failover.Service
 	pricingOverrides    *pricingoverrides.Service
 	workflows           *workflows.Service
 	budgets             *budget.Service
+	rateLimits          *ratelimit.Service
 	tagging             *tagging.Service
 	guardrails          guardrails.Catalog
 	guardrailDefs       *guardrails.Service
@@ -48,6 +52,7 @@ type Handler struct {
 	runtimeConfig       DashboardConfigResponse
 	runtimeRefresher    RuntimeRefresher
 	configuredProviders []providers.SanitizedProviderConfig
+	requestHealth       RequestHealthSource
 
 	mutationMu sync.Mutex
 	pricingMu  sync.Mutex
@@ -61,6 +66,7 @@ const (
 	DashboardConfigLoggingEnabled       = "LOGGING_ENABLED"
 	DashboardConfigUsageEnabled         = "USAGE_ENABLED"
 	DashboardConfigBudgetsEnabled       = "BUDGETS_ENABLED"
+	DashboardConfigRateLimitsEnabled    = "RATE_LIMITS_ENABLED"
 	DashboardConfigGuardrailsEnabled    = "GUARDRAILS_ENABLED"
 	DashboardConfigCacheEnabled         = "CACHE_ENABLED"
 	DashboardConfigRedisURL             = "REDIS_URL"
@@ -78,6 +84,7 @@ type DashboardConfigResponse struct {
 	LoggingEnabled       string `json:"LOGGING_ENABLED,omitempty"`
 	UsageEnabled         string `json:"USAGE_ENABLED,omitempty"`
 	BudgetsEnabled       string `json:"BUDGETS_ENABLED,omitempty"`
+	RateLimitsEnabled    string `json:"RATE_LIMITS_ENABLED,omitempty"`
 	GuardrailsEnabled    string `json:"GUARDRAILS_ENABLED,omitempty"`
 	CacheEnabled         string `json:"CACHE_ENABLED,omitempty"`
 	RedisURL             string `json:"REDIS_URL,omitempty"`
@@ -103,6 +110,10 @@ type providerStatusItemResponse struct {
 	LastError    string                            `json:"last_error,omitempty"`
 	Config       providers.SanitizedProviderConfig `json:"config"`
 	Runtime      providers.ProviderRuntimeSnapshot `json:"runtime"`
+	// RequestHealth reports windowed real-traffic outcomes (per-model error
+	// counts and the live circuit-breaker state); nil when the provider has
+	// served no recent requests or request-health tracking is not wired.
+	RequestHealth *health.ProviderHealth `json:"request_health,omitempty"`
 }
 
 type providerStatusResponse struct {
@@ -182,6 +193,15 @@ func WithVirtualModels(service *virtualmodels.Service) Option {
 	}
 }
 
+// WithMCPServers enables MCP server administration endpoints. Callers must
+// not wrap a nil *mcpgateway.Service (a typed nil would defeat the handlers'
+// feature-unavailable check).
+func WithMCPServers(service MCPServerAdmin) Option {
+	return func(h *Handler) {
+		h.mcpServers = service
+	}
+}
+
 // WithFailover enables failover rule administration endpoints.
 func WithFailover(service *failover.Service) Option {
 	return func(h *Handler) {
@@ -217,17 +237,17 @@ func WithBudgets(service *budget.Service) Option {
 	}
 }
 
+// WithRateLimits enables rate limit administration endpoints.
+func WithRateLimits(service *ratelimit.Service) Option {
+	return func(h *Handler) {
+		h.rateLimits = service
+	}
+}
+
 // WithTagging wires the header tagging service for label rule management.
 func WithTagging(service *tagging.Service) Option {
 	return func(h *Handler) {
 		h.tagging = service
-	}
-}
-
-// WithGuardrailsRegistry enables listing valid guardrail references for workflow authoring.
-func WithGuardrailsRegistry(registry guardrails.Catalog) Option {
-	return func(h *Handler) {
-		h.guardrails = registry
 	}
 }
 
@@ -243,6 +263,20 @@ func WithGuardrailService(service *guardrails.Service) Option {
 func WithLiveBroker(broker *live.Broker) Option {
 	return func(h *Handler) {
 		h.liveBroker = broker
+	}
+}
+
+// RequestHealthSource supplies windowed real-traffic health per provider,
+// keyed by configured provider name.
+type RequestHealthSource interface {
+	Snapshot() map[string]health.ProviderHealth
+}
+
+// WithRequestHealth folds recent request outcomes (per-model errors and the
+// live circuit-breaker state) into the provider status endpoint.
+func WithRequestHealth(source RequestHealthSource) Option {
+	return func(h *Handler) {
+		h.requestHealth = source
 	}
 }
 
@@ -294,6 +328,7 @@ func normalizeDashboardRuntimeConfig(values DashboardConfigResponse) DashboardCo
 		LoggingEnabled:       strings.TrimSpace(values.LoggingEnabled),
 		UsageEnabled:         strings.TrimSpace(values.UsageEnabled),
 		BudgetsEnabled:       strings.TrimSpace(values.BudgetsEnabled),
+		RateLimitsEnabled:    strings.TrimSpace(values.RateLimitsEnabled),
 		GuardrailsEnabled:    strings.TrimSpace(values.GuardrailsEnabled),
 		CacheEnabled:         strings.TrimSpace(values.CacheEnabled),
 		RedisURL:             strings.TrimSpace(values.RedisURL),
@@ -331,8 +366,8 @@ var validIntervals = map[string]bool{
 const (
 	dashboardTimeZoneHeader = "X-GoModel-Timezone"
 	defaultDashboardTZ      = "UTC"
-	defaultDateRangeDays    = 30
-	maxDateRangeDays        = 365
+	defaultDateRangeDays    = usage.DefaultDateRangeDays
+	maxDateRangeDays        = usage.MaxDateRangeDays
 )
 
 var timeNow = time.Now
@@ -351,6 +386,9 @@ func parseUsageParams(c *echo.Context) (usage.UsageQueryParams, error) {
 		params.Interval = "daily"
 	}
 	params.CacheMode = c.QueryParam("cache_mode")
+	params.Model = strings.TrimSpace(c.QueryParam("model"))
+	params.Provider = strings.TrimSpace(c.QueryParam("provider"))
+	params.Label = strings.TrimSpace(c.QueryParam("label"))
 
 	userPath, err := normalizeUserPathQueryParam("user_path", c.QueryParam("user_path"))
 	if err != nil {
@@ -387,60 +425,13 @@ func parseDateRangeParams(c *echo.Context) (usage.UsageQueryParams, error) {
 		}
 	}
 
-	start, end, err := buildDateRange(strings.TrimSpace(c.QueryParam("start_date")), strings.TrimSpace(c.QueryParam("end_date")), days, location, today)
+	start, end, err := usage.BuildDateRange(strings.TrimSpace(c.QueryParam("start_date")), strings.TrimSpace(c.QueryParam("end_date")), days, location, today)
 	if err != nil {
 		return params, err
 	}
 	params.StartDate = start
 	params.EndDate = end
 	return params, nil
-}
-
-func buildDateRange(startStr, endStr string, days int, location *time.Location, today time.Time) (time.Time, time.Time, error) {
-	var start, end time.Time
-	var startParsed, endParsed bool
-
-	if startStr != "" {
-		t, err := time.ParseInLocation("2006-01-02", startStr, location)
-		if err != nil {
-			return time.Time{}, time.Time{}, core.NewInvalidRequestError("invalid start_date format, expected YYYY-MM-DD", nil)
-		}
-		start = t
-		startParsed = true
-	}
-	if endStr != "" {
-		t, err := time.ParseInLocation("2006-01-02", endStr, location)
-		if err != nil {
-			return time.Time{}, time.Time{}, core.NewInvalidRequestError("invalid end_date format, expected YYYY-MM-DD", nil)
-		}
-		end = t
-		endParsed = true
-	}
-
-	if startParsed || endParsed {
-		if !startParsed {
-			start = end.AddDate(0, 0, -29)
-		}
-		if !endParsed {
-			end = today
-		}
-	} else {
-		days = normalizeDateRangeDays(days)
-		end = today
-		start = today.AddDate(0, 0, -(days - 1))
-	}
-
-	if start.After(end) {
-		return time.Time{}, time.Time{}, core.NewInvalidRequestError("start_date must be on or before end_date", nil)
-	}
-	return start, end, nil
-}
-
-func normalizeDateRangeDays(days int) int {
-	if days <= 0 {
-		return defaultDateRangeDays
-	}
-	return min(days, maxDateRangeDays)
 }
 
 func dashboardTimeZone(c *echo.Context) (string, *time.Location) {

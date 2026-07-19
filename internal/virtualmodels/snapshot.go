@@ -5,8 +5,8 @@ import (
 	"sort"
 	"strings"
 
-	"gomodel/internal/core"
-	"gomodel/internal/modelselectors"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/modelselectors"
 )
 
 // resolvedTarget is one redirect destination with its selector parsed at build
@@ -34,15 +34,17 @@ func (e redirectEntry) representative() (resolvedTarget, bool) {
 	return e.targets[0], true
 }
 
-// supportedTargets returns the entry's targets currently backed by the catalog,
-// preserving declared order.
+// supportedTargets returns the entry's targets currently backed by the catalog
+// AND owned by a provider with fresh inventory, preserving declared order. A
+// provider whose latest model refresh failed keeps its models registered but
+// is skipped here, so redirects route around it.
 func (e redirectEntry) supportedTargets(catalog Catalog) []resolvedTarget {
 	if catalog == nil {
 		return nil
 	}
 	out := make([]resolvedTarget, 0, len(e.targets))
 	for _, target := range e.targets {
-		if catalog.Supports(target.qualified) {
+		if catalog.ModelAvailable(target.qualified) {
 			out = append(out, target)
 		}
 	}

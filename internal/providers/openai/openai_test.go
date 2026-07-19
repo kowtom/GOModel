@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"gomodel/internal/core"
-	"gomodel/internal/llmclient"
-	"gomodel/internal/providers"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/llmclient"
+	"github.com/enterpilot/gomodel/internal/providers"
 )
 
 func TestNew(t *testing.T) {
@@ -20,8 +20,8 @@ func TestNew(t *testing.T) {
 	// Use NewWithHTTPClient to get concrete type for internal testing
 	provider := NewWithHTTPClient(apiKey, nil, llmclient.Hooks{})
 
-	if provider.apiKey != apiKey {
-		t.Errorf("apiKey = %q, want %q", provider.apiKey, apiKey)
+	if got := provider.keys.Primary(); got != apiKey {
+		t.Errorf("primary key = %q, want %q", got, apiKey)
 	}
 	if provider.client == nil {
 		t.Error("client should not be nil")
@@ -2086,64 +2086,6 @@ func TestChatCompletion_ReasoningModel_PreservesToolConfiguration(t *testing.T) 
 	}
 	if len(resp.Choices[0].Message.ToolCalls) != 1 || resp.Choices[0].Message.ToolCalls[0].Function.Name != "lookup_weather" {
 		t.Fatalf("tool_calls = %+v, want lookup_weather", resp.Choices[0].Message.ToolCalls)
-	}
-}
-
-func TestIsValidClientRequestID(t *testing.T) {
-	tests := []struct {
-		name  string
-		id    string
-		valid bool
-	}{
-		{
-			name:  "valid UUID",
-			id:    "123e4567-e89b-12d3-a456-426614174000",
-			valid: true,
-		},
-		{
-			name:  "valid short ID",
-			id:    "req-123",
-			valid: true,
-		},
-		{
-			name:  "valid empty string",
-			id:    "",
-			valid: true,
-		},
-		{
-			name:  "valid 512 chars",
-			id:    strings.Repeat("a", 512),
-			valid: true,
-		},
-		{
-			name:  "invalid - 513 chars (too long)",
-			id:    strings.Repeat("a", 513),
-			valid: false,
-		},
-		{
-			name:  "invalid - non-ASCII character",
-			id:    "req-123-日本語",
-			valid: false,
-		},
-		{
-			name:  "invalid - emoji",
-			id:    "req-123-🎉",
-			valid: false,
-		},
-		{
-			name:  "valid - all printable ASCII",
-			id:    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.",
-			valid: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := isValidClientRequestID(tt.id)
-			if got != tt.valid {
-				t.Errorf("isValidClientRequestID(%q) = %v, want %v", tt.id, got, tt.valid)
-			}
-		})
 	}
 }
 

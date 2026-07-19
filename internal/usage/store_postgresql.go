@@ -11,17 +11,21 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/enterpilot/gomodel/internal/storage"
+	"github.com/enterpilot/gomodel/internal/storage/sqlutil"
 )
 
 const (
-	usageInsertColumnCount     = 20
+	usageInsertColumnCount     = 22
 	postgresMaxBindParameters  = 65535
 	usageInsertMaxRowsPerQuery = postgresMaxBindParameters / usageInsertColumnCount
 )
 
 const usageInsertPrefix = `
 		INSERT INTO usage (id, request_id, provider_id, timestamp, model, provider, provider_name,
-			endpoint, user_path, cache_type, labels, input_tokens, output_tokens, total_tokens, raw_data,
+			endpoint, user_path, cache_type, labels, input_tokens, output_tokens, total_tokens,
+			rewrite_tokens_saved, rewrite_cost_saved, raw_data,
 			input_cost, output_cost, total_cost, cost_source, costs_calculation_caveat)
 		VALUES `
 
@@ -67,6 +71,8 @@ func NewPostgreSQLStore(pool *pgxpool.Pool, retentionDays int) (*PostgreSQLStore
 			input_tokens INTEGER NOT NULL DEFAULT 0,
 			output_tokens INTEGER NOT NULL DEFAULT 0,
 			total_tokens INTEGER NOT NULL DEFAULT 0,
+			rewrite_tokens_saved INTEGER NOT NULL DEFAULT 0,
+			rewrite_cost_saved DOUBLE PRECISION,
 			raw_data JSONB
 		)
 	`)
@@ -85,6 +91,8 @@ func NewPostgreSQLStore(pool *pgxpool.Pool, retentionDays int) (*PostgreSQLStore
 		"ALTER TABLE usage ADD COLUMN IF NOT EXISTS user_path TEXT",
 		"ALTER TABLE usage ADD COLUMN IF NOT EXISTS cache_type TEXT",
 		"ALTER TABLE usage ADD COLUMN IF NOT EXISTS labels JSONB",
+		"ALTER TABLE usage ADD COLUMN IF NOT EXISTS rewrite_tokens_saved INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE usage ADD COLUMN IF NOT EXISTS rewrite_cost_saved DOUBLE PRECISION",
 	}
 	for _, migration := range costMigrations {
 		if _, err := pool.Exec(ctx, migration); err != nil {
@@ -119,7 +127,7 @@ func NewPostgreSQLStore(pool *pgxpool.Pool, retentionDays int) (*PostgreSQLStore
 
 	// Start background cleanup if retention is configured
 	if retentionDays > 0 {
-		go RunCleanupLoop(store.stopCleanup, store.cleanup)
+		go storage.RunCleanupLoop(store.stopCleanup, CleanupInterval, store.cleanup)
 	}
 
 	return store, nil
@@ -216,10 +224,12 @@ func buildUsageInsert(entries []*UsageEntry) (string, []any) {
 			entry.Endpoint,
 			entry.UserPath,
 			cacheTypeValue(entry.CacheType),
-			marshalLabels(entry.Labels, entry.ID),
+			sqlutil.NullableJSONStrings(entry.Labels, entry.ID),
 			entry.InputTokens,
 			entry.OutputTokens,
 			entry.TotalTokens,
+			entry.RewriteTokensSaved,
+			entry.RewriteCostSaved,
 			rawDataJSON,
 			entry.InputCost,
 			entry.OutputCost,

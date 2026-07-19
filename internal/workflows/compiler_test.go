@@ -4,9 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"gomodel/internal/core"
-	"gomodel/internal/guardrails"
-	"gomodel/internal/responsecache"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/guardrails"
 )
 
 func TestCompilerCompile_Guardrails(t *testing.T) {
@@ -15,7 +14,7 @@ func TestCompilerCompile_Guardrails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSystemPromptGuardrail() error = %v", err)
 	}
-	if err := registry.Register(rule, responsecache.GuardrailRuleDescriptor{
+	if err := registry.Register(rule, guardrails.RuleDescriptor{
 		Type:    "system_prompt",
 		Mode:    string(guardrails.SystemPromptInject),
 		Content: "be precise",
@@ -23,7 +22,7 @@ func TestCompilerCompile_Guardrails(t *testing.T) {
 		t.Fatalf("Register() error = %v", err)
 	}
 
-	compiled, err := NewCompiler(registry).Compile(Version{
+	compiled, err := NewCompilerWithFeatureCaps(registry, core.DefaultWorkflowFeatures()).Compile(Version{
 		ID:      "workflow-1",
 		Scope:   Scope{},
 		Version: 3,
@@ -134,7 +133,7 @@ func TestCompilerCompile_DefaultsFailoverEnabledWhenUnset(t *testing.T) {
 }
 
 func TestCompilerCompile_ReturnsGatewayErrorWhenGuardrailsCatalogIsEmpty(t *testing.T) {
-	_, err := NewCompiler(guardrails.NewRegistry()).Compile(Version{
+	_, err := NewCompilerWithFeatureCaps(guardrails.NewRegistry(), core.DefaultWorkflowFeatures()).Compile(Version{
 		ID:      "workflow-1",
 		Scope:   Scope{},
 		Version: 1,
@@ -162,7 +161,7 @@ func TestCompilerCompile_WrapsBuildPipelineErrorsAsGatewayErrors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSystemPromptGuardrail() error = %v", err)
 	}
-	if err := registry.Register(rule, responsecache.GuardrailRuleDescriptor{
+	if err := registry.Register(rule, guardrails.RuleDescriptor{
 		Name:    "present",
 		Type:    "system_prompt",
 		Mode:    string(guardrails.SystemPromptInject),
@@ -170,7 +169,7 @@ func TestCompilerCompile_WrapsBuildPipelineErrorsAsGatewayErrors(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
-	_, err = NewCompiler(registry).Compile(Version{
+	_, err = NewCompilerWithFeatureCaps(registry, core.DefaultWorkflowFeatures()).Compile(Version{
 		ID:      "workflow-1",
 		Scope:   Scope{},
 		Version: 1,

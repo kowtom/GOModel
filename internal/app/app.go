@@ -15,27 +15,34 @@ import (
 
 	"github.com/goccy/go-json"
 
-	"gomodel/config"
-	"gomodel/internal/admin"
-	"gomodel/internal/admin/dashboard"
-	"gomodel/internal/auditlog"
-	"gomodel/internal/authkeys"
-	"gomodel/internal/batch"
-	"gomodel/internal/budget"
-	"gomodel/internal/core"
-	"gomodel/internal/failover"
-	"gomodel/internal/filestore"
-	"gomodel/internal/guardrails"
-	"gomodel/internal/live"
-	"gomodel/internal/pricingoverrides"
-	"gomodel/internal/providers"
-	"gomodel/internal/responsecache"
-	"gomodel/internal/server"
-	"gomodel/internal/storage"
-	"gomodel/internal/tagging"
-	"gomodel/internal/usage"
-	"gomodel/internal/virtualmodels"
-	"gomodel/internal/workflows"
+	"github.com/enterpilot/gomodel/config"
+	"github.com/enterpilot/gomodel/ext"
+	"github.com/enterpilot/gomodel/internal/admin"
+	"github.com/enterpilot/gomodel/internal/admin/dashboard"
+	"github.com/enterpilot/gomodel/internal/auditlog"
+	"github.com/enterpilot/gomodel/internal/authkeys"
+	"github.com/enterpilot/gomodel/internal/batch"
+	"github.com/enterpilot/gomodel/internal/budget"
+	"github.com/enterpilot/gomodel/internal/conversationstore"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/failover"
+	"github.com/enterpilot/gomodel/internal/filestore"
+	"github.com/enterpilot/gomodel/internal/guardrails"
+	"github.com/enterpilot/gomodel/internal/httpclient"
+	"github.com/enterpilot/gomodel/internal/live"
+	"github.com/enterpilot/gomodel/internal/mcpgateway"
+	"github.com/enterpilot/gomodel/internal/pricingoverrides"
+	"github.com/enterpilot/gomodel/internal/providers"
+	"github.com/enterpilot/gomodel/internal/providers/health"
+	"github.com/enterpilot/gomodel/internal/ratelimit"
+	"github.com/enterpilot/gomodel/internal/responsecache"
+	"github.com/enterpilot/gomodel/internal/responsestore"
+	"github.com/enterpilot/gomodel/internal/server"
+	"github.com/enterpilot/gomodel/internal/storage"
+	"github.com/enterpilot/gomodel/internal/tagging"
+	"github.com/enterpilot/gomodel/internal/usage"
+	"github.com/enterpilot/gomodel/internal/virtualmodels"
+	"github.com/enterpilot/gomodel/internal/workflows"
 )
 
 // App represents the main application with all its dependencies.
@@ -46,11 +53,15 @@ type App struct {
 	audit            *auditlog.Result
 	usage            *usage.Result
 	budgets          *budget.Result
+	rateLimits       *ratelimit.Result
 	batch            *batch.Result
 	fileStore        *filestore.Result
+	responseStore    *responsestore.Result
+	conversations    *conversationstore.Result
 	virtualModels    *virtualmodels.Result
 	failover         *failover.Result
 	tagging          *tagging.Result
+	mcpGateway       *mcpgateway.Result
 	pricingOverrides *pricingoverrides.Result
 	authKeys         *authkeys.Result
 	guardrails       *guardrails.Result
@@ -75,6 +86,23 @@ type Config struct {
 
 	// Factory provides the ProviderFactory used to construct provider instances.
 	Factory *providers.ProviderFactory
+
+	// Extensions optionally carries registered gateway extensions (request
+	// rewriters, middleware, routes). The registry is snapshotted here; later
+	// registrations have no effect.
+	Extensions *ext.Registry
+}
+
+// applyExtensions snapshots a registered extension set into the server
+// configuration. A nil registry leaves the config untouched.
+func applyExtensions(serverCfg *server.Config, extensions *ext.Registry) {
+	if extensions == nil {
+		return
+	}
+	serverCfg.RequestRewriters = extensions.Rewriters()
+	serverCfg.ExtraMiddleware = extensions.Middleware()
+	serverCfg.ExtraRoutes = extensions.Routes()
+	serverCfg.ExtraAuthSkipPaths = extensions.PublicPaths()
 }
 
 // New creates a new App with all dependencies initialized.
@@ -93,6 +121,9 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	}
 
 	appCfg := cfg.AppConfig.Config
+	// Install config-file HTTP timeouts before any provider constructs a
+	// transport; env vars still take precedence inside httpclient.
+	httpclient.SetConfiguredTimeouts(appCfg.HTTP.Timeout, appCfg.HTTP.ResponseHeaderTimeout)
 	if appCfg.Budgets.Enabled && !appCfg.Usage.Enabled {
 		appCfg.Budgets.Enabled = false
 		slog.Warn("budget management disabled because usage tracking is disabled",
@@ -147,6 +178,11 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 			sharedStorage = s
 		}
 	}
+
+	// Track real-traffic outcomes per provider/model for the dashboard's
+	// provider status; hooks must be composed before any provider is created.
+	requestHealth := health.NewTracker()
+	cfg.Factory.AddHooks(requestHealth.Hooks())
 
 	providerResult, err := providers.Init(ctx, cfg.AppConfig, cfg.Factory)
 	if err != nil {
@@ -204,6 +240,29 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	app.budgets = budgetResult
 	closers = append(closers, app.budgets.Close)
 
+	var rateLimitResult *ratelimit.Result
+	if appCfg.RateLimits.Enabled {
+		if sharedStorage != nil {
+			rateLimitResult, err = ratelimit.NewWithSharedStorage(ctx, appCfg, sharedStorage)
+		} else {
+			rateLimitResult, err = ratelimit.New(ctx, appCfg)
+		}
+		if err != nil {
+			return fail("failed to initialize rate limits", err)
+		}
+		if rateLimitResult.Service.HasTokenRules() && !appCfg.Usage.Enabled {
+			slog.Warn("token rate limits configured but usage tracking is disabled; max_tokens limits will not be enforced",
+				"usage_enabled", false,
+				"hint", "enable usage tracking to enforce token rate limits, or remove max_tokens from rate limit rules",
+			)
+		}
+	} else {
+		rateLimitResult = &ratelimit.Result{}
+		slog.Info("rate limits disabled")
+	}
+	app.rateLimits = rateLimitResult
+	closers = append(closers, app.rateLimits.Close)
+
 	// Initialize batch lifecycle storage.
 	var batchResult *batch.Result
 	if sharedStorage != nil {
@@ -232,13 +291,49 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	closers = append(closers, app.fileStore.Close)
 	claimSharedStorage(fileStoreResult.Storage)
 
+	// Initialize Responses/Conversations lifecycle persistence so agentic
+	// response chains and conversation history land in storage instead of
+	// accumulating in process memory.
+	var responseStoreResult *responsestore.Result
+	if sharedStorage != nil {
+		responseStoreResult, err = responsestore.NewWithSharedStorage(ctx, sharedStorage)
+	} else {
+		responseStoreResult, err = responsestore.New(ctx, appCfg)
+	}
+	if err != nil {
+		return fail("failed to initialize response snapshot storage", err)
+	}
+	app.responseStore = responseStoreResult
+	closers = append(closers, app.responseStore.Close)
+	claimSharedStorage(responseStoreResult.Storage)
+
+	var conversationStoreResult *conversationstore.Result
+	if sharedStorage != nil {
+		conversationStoreResult, err = conversationstore.NewWithSharedStorage(ctx, sharedStorage)
+	} else {
+		conversationStoreResult, err = conversationstore.New(ctx, appCfg)
+	}
+	if err != nil {
+		return fail("failed to initialize conversation storage", err)
+	}
+	app.conversations = conversationStoreResult
+	closers = append(closers, app.conversations.Close)
+	claimSharedStorage(conversationStoreResult.Storage)
+
 	// Initialize virtual models (unified aliases + access overrides) using
-	// shared storage when already available.
+	// shared storage when already available. Provider names declared in YAML —
+	// including entries whose credentials did not resolve, which never register —
+	// let validation tell a misspelled target provider (abort startup) from a
+	// declared-but-inactive one (warn, target stays unavailable).
+	declaredProviders := make([]string, 0, len(cfg.AppConfig.RawProviders))
+	for name := range cfg.AppConfig.RawProviders {
+		declaredProviders = append(declaredProviders, name)
+	}
 	var virtualModelsResult *virtualmodels.Result
 	if sharedStorage != nil {
-		virtualModelsResult, err = virtualmodels.NewWithSharedStorage(ctx, appCfg, sharedStorage, providerResult.Registry)
+		virtualModelsResult, err = virtualmodels.NewWithSharedStorage(ctx, appCfg, sharedStorage, providerResult.Registry, declaredProviders)
 	} else {
-		virtualModelsResult, err = virtualmodels.New(ctx, appCfg, providerResult.Registry)
+		virtualModelsResult, err = virtualmodels.New(ctx, appCfg, providerResult.Registry, declaredProviders)
 	}
 	if err != nil {
 		return fail("failed to initialize virtual models", err)
@@ -251,6 +346,20 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	// resolution (redirects), access authorization (policies), and exposed-model
 	// listing.
 	vm := app.virtualModels.Service
+
+	// Load balancing prefers targets with live rate-limit capacity and falls
+	// back to the first declared target when every target is saturated, so
+	// the request reaches admission and receives an honest 429 (or defers to
+	// failover) instead of the all-targets-down error. Capacity deliberately
+	// steers target choice only: a saturated target stays in the catalog,
+	// listed and valid.
+	if rateLimitResult.Service != nil {
+		registry := providerResult.Registry
+		limiter := rateLimitResult.Service
+		vm.SetTargetCapacity(func(qualifiedModel string) bool {
+			return limiter.RouteAvailable(registry.GetProviderName(qualifiedModel), qualifiedModel)
+		})
+	}
 
 	var failoverResult *failover.Result
 	if sharedStorage != nil {
@@ -298,7 +407,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	refreshInterval := workflowRefreshInterval(appCfg)
 	var guardrailExecutor guardrails.ChatCompletionExecutor = app.providers.Router
 	if vm != nil {
-		guardrailExecutor = virtualmodels.NewProviderWithOptions(app.providers.Router, vm, virtualmodels.Options{})
+		guardrailExecutor = virtualmodels.NewChatExecutor(app.providers.Router, vm)
 	}
 
 	// Initialize reusable guardrail definitions using shared storage when already available.
@@ -397,6 +506,54 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 			"recommendation", "rebuild with -tags=swagger")
 	}
 
+	// The usage tap feeds recorded token counts into rate limit token windows
+	// before delegating to the real logger; it is transparent when no rate
+	// limit service exists.
+	serverUsageLogger := usage.LoggerInterface(usageResult.Logger)
+	if rateLimitResult.Service != nil {
+		serverUsageLogger = ratelimit.NewUsageTap(serverUsageLogger, rateLimitResult.Service)
+	}
+
+	// Initialize the MCP gateway (aggregated upstream MCP servers behind /mcp).
+	var mcpResult *mcpgateway.Result
+	if appCfg.MCP.Enabled {
+		if sharedStorage != nil {
+			mcpResult, err = mcpgateway.NewWithSharedStorage(ctx, appCfg, sharedStorage, nil, serverUsageLogger)
+		} else {
+			mcpResult, err = mcpgateway.New(ctx, appCfg, nil, serverUsageLogger)
+		}
+		if err != nil {
+			return fail("failed to initialize mcp gateway", err)
+		}
+		app.mcpGateway = mcpResult
+		closers = append(closers, app.mcpGateway.Close)
+		claimSharedStorage(mcpResult.Storage)
+		slog.Info("mcp gateway enabled",
+			"path", config.JoinBasePath(appCfg.Server.BasePath, "/mcp"),
+			"configured_servers", len(appCfg.MCP.Servers))
+	} else {
+		slog.Info("mcp gateway disabled")
+	}
+
+	// The self-service GET /v1/usage endpoint and the admin dashboard read
+	// usage aggregates through one shared reader. Audit storage is preferred
+	// because its schema always includes the usage tables.
+	usageReadStorage := auditResult.Storage
+	if usageReadStorage == nil {
+		usageReadStorage = usageResult.Storage
+	}
+	var usageReader usage.UsageReader
+	if usageReadStorage != nil {
+		var readerErr error
+		usageReader, readerErr = usage.NewReader(usageReadStorage)
+		if readerErr != nil {
+			slog.Warn("usage reader unavailable; usage endpoints will omit usage data", "error", readerErr)
+			// Explicit reset so a typed-nil reader never reaches the nil checks
+			// downstream (same guard as pricingRecalculator).
+			usageReader = nil
+		}
+	}
+
 	serverCfg := &server.Config{
 		BasePath:                        appCfg.Server.BasePath,
 		MasterKey:                       appCfg.Server.MasterKey,
@@ -406,7 +563,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		BodySizeLimit:                   appCfg.Server.BodySizeLimit,
 		PprofEnabled:                    appCfg.Server.PprofEnabled,
 		AuditLogger:                     auditResult.Logger,
-		UsageLogger:                     usageResult.Logger,
+		UsageLogger:                     serverUsageLogger,
 		BudgetChecker:                   budgetResult.Service,
 		PricingResolver:                 pricingResolver,
 		ModelResolver:                   vm,
@@ -420,6 +577,8 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		PassthroughSemanticEnrichers:    cfg.Factory.PassthroughSemanticEnrichers(),
 		BatchStore:                      batchResult.Store,
 		FileStore:                       fileStoreResult.Store,
+		ResponseStore:                   responseStoreResult.Store,
+		ConversationStore:               conversationStoreResult.Store,
 		LogOnlyModelInteractions:        appCfg.Logging.OnlyModelInteractions,
 		DisablePassthroughRoutes:        !appCfg.Server.EnablePassthroughRoutes,
 		EnabledPassthroughProviders:     appCfg.Server.EnabledPassthroughProviders,
@@ -428,7 +587,22 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		UserPathHeader:                  appCfg.Server.UserPathHeader,
 		SwaggerEnabled:                  swaggerEnabled,
 		Tagging:                         taggingResult.Service,
+		MCPEnabled:                      appCfg.MCP.Enabled,
 	}
+	if mcpResult != nil {
+		serverCfg.MCPGateway = mcpResult.Service
+	}
+
+	// Assigned conditionally so a disabled feature leaves the interface nil
+	// (a typed-nil *ratelimit.Service would defeat the fast nil check).
+	if rateLimitResult.Service != nil {
+		serverCfg.RateLimiter = rateLimitResult.Service
+	}
+	if usageReader != nil {
+		serverCfg.UsageSummarizer = usageReader
+	}
+
+	applyExtensions(serverCfg, cfg.Extensions)
 
 	// Wire the readiness storage probe. Storage is a required dependency, so a
 	// failed ping makes /health/ready report not_ready (503). When no storage
@@ -447,8 +621,9 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	usageEnabledForDashboard := usageResult.Logger.Config().Enabled
 	if adminCfg.EndpointsEnabled {
 		adminHandler, dashHandler, adminErr := initAdmin(
+			usageReader,
+			usageReadStorage,
 			auditResult.Storage,
-			usageResult.Storage,
 			providerResult.Registry,
 			providerResult.ConfiguredProviders,
 			authKeyResult.Service,
@@ -458,10 +633,13 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 			workflowResult.Service,
 			app.guardrails.Service,
 			budgetResult.Service,
+			rateLimitResult.Service,
 			taggingResult.Service,
+			mcpResult,
 			app,
 			dashboardRuntimeConfig(appCfg, usageEnabledForDashboard),
 			app.live,
+			requestHealth,
 			usagePricingRecalculationConfigured(appCfg),
 			appCfg.Server.BasePath,
 			adminCfg.UIEnabled,
@@ -518,9 +696,11 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		WorkflowPolicyResolver: workflowResult.Service,
 		FailoverResolver:       serverCfg.FailoverResolver,
 		AuditLogger:            auditResult.Logger,
-		UsageLogger:            usageResult.Logger,
-		PricingResolver:        pricingResolver,
-		ResponseCache:          rcm,
+		// The tapped logger, so guardrail LLM calls count toward the
+		// request's rate limit token windows like any other completion.
+		UsageLogger:     serverUsageLogger,
+		PricingResolver: pricingResolver,
+		ResponseCache:   rcm,
 	})
 	if err := guardrailResult.Service.SetExecutor(ctx, internalGuardrailExecutor); err != nil {
 		return fail("failed to wire internal guardrail executor", err)
@@ -648,7 +828,7 @@ func (a *App) startServer(ctx context.Context, address string, start func(contex
 
 // Shutdown gracefully tears down app components in dependency order.
 // Order:
-// 1. Cancel HTTP server context, close live streams, and wait for the server to stop.
+// 1. Close long-lived streams, cancel the HTTP server context, and wait for it to stop.
 // 2. Provider subsystem close (stops model refresh loop and cache resources).
 // 3. Batch store close.
 // 4. Usage logger close (flushes pending usage records).
@@ -669,16 +849,23 @@ func (a *App) Shutdown(ctx context.Context) error {
 
 	var errs []error
 
-	// 1. Stop HTTP server first (stop accepting new requests)
+	// 1. End long-lived streams before asking the HTTP server to drain. MCP
+	// Streamable HTTP clients intentionally keep a GET request open; leaving it
+	// alive here makes Echo wait until its graceful-shutdown timeout.
+	if a.mcpGateway != nil && a.mcpGateway.Service != nil {
+		a.mcpGateway.Service.Close()
+	}
+	if a.live != nil {
+		a.live.Close()
+	}
+
+	// Stop accepting new requests and wait for in-flight requests to finish.
 	a.serverMu.Lock()
 	serverStop := a.serverStop
 	serverDone := a.serverDone
 	a.serverMu.Unlock()
 	if serverStop != nil {
 		serverStop()
-	}
-	if a.live != nil {
-		a.live.Close()
 	}
 	if serverDone != nil {
 		select {
@@ -711,6 +898,14 @@ func (a *App) Shutdown(ctx context.Context) error {
 		if err := a.providers.Close(); err != nil {
 			slog.Error("providers close error", "error", err)
 			errs = append(errs, fmt.Errorf("providers close: %w", err))
+		}
+	}
+
+	// 3b. Close the MCP gateway (terminates upstream MCP sessions).
+	if a.mcpGateway != nil {
+		if err := a.mcpGateway.Close(); err != nil {
+			slog.Error("mcp gateway close error", "error", err)
+			errs = append(errs, fmt.Errorf("mcp gateway close: %w", err))
 		}
 	}
 
@@ -794,6 +989,14 @@ func (a *App) Shutdown(ctx context.Context) error {
 		}
 	}
 
+	// 13b. Close rate limit subsystem.
+	if a.rateLimits != nil {
+		if err := a.rateLimits.Close(); err != nil {
+			slog.Error("rate limits close error", "error", err)
+			errs = append(errs, fmt.Errorf("rate limits close: %w", err))
+		}
+	}
+
 	// 14. Close usage tracking (flushes pending entries)
 	if a.usage != nil {
 		if err := a.usage.Close(); err != nil {
@@ -845,7 +1048,11 @@ func (a *App) logStartupInfo() {
 	}
 
 	// Storage configuration (shared by audit logging and usage tracking)
-	slog.Info("storage configured", "type", cfg.Storage.Type)
+	if backend := cfg.Storage.BackendConfig(); backend.Type == storage.TypeSQLite {
+		slog.Info("storage configured", "type", backend.Type, "path", backend.SQLite.Path)
+	} else {
+		slog.Info("storage configured", "type", backend.Type)
+	}
 
 	// Audit logging configuration
 	if cfg.Logging.Enabled {
@@ -875,7 +1082,9 @@ func (a *App) logStartupInfo() {
 // initAdmin creates the admin API handler and optionally the dashboard handler.
 // Returns nil dashboard handler if uiEnabled is false.
 func initAdmin(
-	auditStorage, usageStorage storage.Storage,
+	reader usage.UsageReader,
+	usageReadStorage storage.Storage,
+	auditStorage storage.Storage,
 	registry *providers.ModelRegistry,
 	configuredProviders []providers.SanitizedProviderConfig,
 	authKeyService *authkeys.Service,
@@ -885,37 +1094,25 @@ func initAdmin(
 	workflowService *workflows.Service,
 	guardrailService *guardrails.Service,
 	budgetService *budget.Service,
+	rateLimitService *ratelimit.Service,
 	taggingService *tagging.Service,
+	mcpResult *mcpgateway.Result,
 	runtimeRefresher admin.RuntimeRefresher,
 	runtimeConfig admin.DashboardConfigResponse,
 	liveBroker *live.Broker,
+	requestHealth admin.RequestHealthSource,
 	usagePricingRecalculationEnabled bool,
 	basePath string,
 	uiEnabled bool,
 ) (*admin.Handler, *dashboard.Handler, error) {
-	// Find a storage connection for reading usage data
-	var store storage.Storage
-	if auditStorage != nil {
-		store = auditStorage
-	} else if usageStorage != nil {
-		store = usageStorage
-	}
-
-	// Create usage reader (may be nil if no storage)
-	var reader usage.UsageReader
+	// Pricing recalculation writes through the same storage the reader uses.
 	var pricingRecalculator usage.PricingRecalculator
-	if store != nil {
+	if usageReadStorage != nil && usagePricingRecalculationEnabled {
 		var err error
-		reader, err = usage.NewReader(store)
+		pricingRecalculator, err = usage.NewPricingRecalculator(usageReadStorage)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to create usage reader: %w", err)
-		}
-		if usagePricingRecalculationEnabled {
-			pricingRecalculator, err = usage.NewPricingRecalculator(store)
-			if err != nil {
-				slog.Warn("usage pricing recalculation unavailable", "error", err)
-				pricingRecalculator = nil
-			}
+			slog.Warn("usage pricing recalculation unavailable", "error", err)
+			pricingRecalculator = nil
 		}
 	}
 	runtimeConfig.PricingRecalculation = dashboardEnabledValue(usagePricingRecalculationEnabled && pricingRecalculator != nil)
@@ -929,6 +1126,14 @@ func initAdmin(
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to create audit reader: %w", err)
 		}
+	}
+
+	// Assigned conditionally so a disabled MCP gateway leaves the option nil
+	// (a typed-nil *mcpgateway.Service stored in the interface field would
+	// defeat the handlers' feature-unavailable check).
+	var mcpOption admin.Option
+	if mcpResult != nil && mcpResult.Service != nil {
+		mcpOption = admin.WithMCPServers(mcpResult.Service)
 	}
 
 	adminHandler := admin.NewHandler(
@@ -945,10 +1150,13 @@ func initAdmin(
 		admin.WithWorkflows(workflowService),
 		admin.WithGuardrailService(guardrailService),
 		admin.WithBudgets(budgetService),
+		admin.WithRateLimits(rateLimitService),
 		admin.WithTagging(taggingService),
+		mcpOption,
 		admin.WithRuntimeRefresher(runtimeRefresher),
 		admin.WithDashboardRuntimeConfig(runtimeConfig),
 		admin.WithLiveBroker(liveBroker),
+		admin.WithRequestHealth(requestHealth),
 	)
 
 	var dashHandler *dashboard.Handler
@@ -1075,6 +1283,7 @@ func dashboardRuntimeConfig(cfg *config.Config, usageEnabled bool) admin.Dashboa
 		LoggingEnabled:       dashboardEnabledValue(cfg != nil && cfg.Logging.Enabled),
 		UsageEnabled:         dashboardEnabledValue(cfg != nil && cfg.Usage.Enabled),
 		BudgetsEnabled:       dashboardEnabledValue(cfg != nil && cfg.Budgets.Enabled),
+		RateLimitsEnabled:    dashboardEnabledValue(cfg != nil && cfg.RateLimits.Enabled),
 		GuardrailsEnabled:    dashboardEnabledValue(cfg != nil && cfg.Guardrails.Enabled),
 		CacheEnabled:         dashboardEnabledValue(cacheAnalyticsConfigured(cfg, usageEnabled)),
 		RedisURL:             dashboardEnabledValue(simpleResponseCacheConfigured(cfg)),

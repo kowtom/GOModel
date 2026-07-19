@@ -29,6 +29,7 @@ const (
 	OperationAudioTranscriptions Operation = "audio_transcriptions"
 	OperationRealtime            Operation = "realtime"
 	OperationProviderPassthrough Operation = "provider_passthrough"
+	OperationMCP                 Operation = "mcp"
 )
 
 // EndpointDescriptor centralizes the transport-facing classification of model and provider routes.
@@ -90,6 +91,16 @@ func describeEndpointPath(path string) EndpointDescriptor {
 			Dialect:          "openai_compat",
 			Operation:        OperationEmbeddings,
 		}
+	case path == "/v1/messages/batches" || strings.HasPrefix(path, "/v1/messages/batches/"):
+		// Anthropic Message Batches dialect. Translated to the canonical batch
+		// type at ingress and served by the same native-batch pipeline as
+		// /v1/batches (see ADR-0007 for the edge-translation pattern).
+		return EndpointDescriptor{
+			ModelInteraction: true,
+			IngressManaged:   true,
+			Dialect:          "anthropic",
+			Operation:        OperationBatches,
+		}
 	case path == "/v1/messages" || path == "/v1/messages/count_tokens":
 		// Anthropic Messages dialect. It is translated to the canonical chat
 		// type at ingress and runs through the chat-completions pipeline, so it
@@ -131,15 +142,28 @@ func describeEndpointPath(path string) EndpointDescriptor {
 			Dialect:          "openai_compat",
 			Operation:        OperationAudioTranscriptions,
 		}
-	case path == "/v1/realtime":
-		// The realtime endpoint upgrades to a websocket and relays the provider's
-		// event schema verbatim. It is a model interaction (incurs usage, must be
-		// observable) but is not IngressManaged: the handler hijacks the connection
+	case path == "/v1/realtime" || path == "/v1/realtime/calls" || path == "/v1/realtime/client_secrets":
+		// The realtime endpoints relay the provider's schema verbatim: /v1/realtime
+		// upgrades to a websocket, /v1/realtime/calls exchanges WebRTC SDP, and
+		// /v1/realtime/client_secrets mints ephemeral browser credentials. They are
+		// model interactions (incur usage, must be observable) but not
+		// IngressManaged: the handlers parse or hijack the transport themselves
 		// rather than going through the JSON inference pipeline.
 		return EndpointDescriptor{
 			ModelInteraction: true,
 			Dialect:          "openai_compat",
 			Operation:        OperationRealtime,
+		}
+	case path == "/mcp" || strings.HasPrefix(path, "/mcp/"):
+		// The MCP gateway relays JSON-RPC tool traffic to upstream MCP servers.
+		// It is a model interaction (incurs usage, must be observable, may hold
+		// a long-lived SSE stream that needs the write deadline cleared) but is
+		// not IngressManaged: the MCP SDK handler owns the exchange rather than
+		// the JSON inference pipeline.
+		return EndpointDescriptor{
+			ModelInteraction: true,
+			Dialect:          "mcp",
+			Operation:        OperationMCP,
 		}
 	case strings.HasPrefix(path, "/p/"):
 		return EndpointDescriptor{
@@ -191,6 +215,18 @@ func bodyModeForEndpoint(method, path string, operation Operation) BodyMode {
 	case OperationAudioTranscriptions:
 		return BodyModeMultipart
 	case OperationRealtime:
+		if method == http.MethodPost && path == "/v1/realtime/client_secrets" {
+			return BodyModeJSON
+		}
+		if method == http.MethodPost && path == "/v1/realtime/calls" {
+			// SDP exchange bodies are application/sdp or multipart form data.
+			return BodyModeOpaque
+		}
+		return BodyModeNone
+	case OperationMCP:
+		if method == http.MethodPost {
+			return BodyModeJSON
+		}
 		return BodyModeNone
 	case OperationProviderPassthrough:
 		return BodyModeOpaque

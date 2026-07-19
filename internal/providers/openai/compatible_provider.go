@@ -1,39 +1,90 @@
 package openai
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 
-	"gomodel/internal/core"
-	"gomodel/internal/llmclient"
-	"gomodel/internal/providers"
+	"github.com/goccy/go-json"
+
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/llmclient"
+	"github.com/enterpilot/gomodel/internal/providers"
 )
 
 type RequestMutator func(*llmclient.Request)
 
 type CompatibleProviderConfig struct {
-	ProviderName   string
-	BaseURL        string
+	ProviderName string
+	BaseURL      string
+	// HTTPClient overrides the shared default client while retaining the
+	// factory-provided retry, circuit-breaker, and observability settings.
+	// Providers use this for transport-level concerns such as request signing.
+	HTTPClient     *http.Client
 	SetHeaders     func(*http.Request, string)
 	RequestMutator RequestMutator
+	// AdaptChatRequest rewrites the typed chat request before provider
+	// dispatch on ChatCompletion and StreamChatCompletion. Providers use it
+	// for parameter quirks (e.g. remapping reasoning effort levels) instead
+	// of overriding the chat methods, so Responses-via-chat translation picks
+	// the adaptation up automatically. It must not mutate its argument;
+	// return a shallow copy when changes are needed.
+	AdaptChatRequest func(*core.ChatRequest) (*core.ChatRequest, error)
+	// ChatRequestHeaders returns extra per-request HTTP headers for
+	// ChatCompletion and StreamChatCompletion, derived from the request
+	// context and body (e.g. conversation affinity headers). Nil results are
+	// ignored.
+	ChatRequestHeaders func(context.Context, *core.ChatRequest) http.Header
 }
 
+// CompatibleProvider is the single transport engine for every
+// OpenAI-compatible upstream. Provider packages must not hand-roll
+// llmclient calls for OpenAI-shaped endpoints; they wrap this type in one
+// of three ways, chosen by how much of the OpenAI surface the upstream
+// actually implements:
+//
+//   - Embed *ChatCompatible for chat-centric upstreams (chat, models,
+//     embeddings, passthrough; Responses translated via chat) — e.g.
+//     xiaomi, zai, fireworks, deepseek.
+//   - Embed *CompatibleProvider only when the upstream implements the
+//     full surface, including audio, files, batches, and native response
+//     lifecycle management — e.g. openrouter, azure.
+//   - Compose an unexported *CompatibleProvider field and delegate the
+//     supported methods explicitly when the upstream implements a partial
+//     surface — e.g. groq (no passthrough), xai (no audio/passthrough),
+//     ollama (native embeddings, no passthrough). Go embedding cannot
+//     subtract methods, and an accidentally inherited method advertises a
+//     capability the upstream lacks (the router discovers capabilities by
+//     interface assertion).
+//
+// Provider quirks belong in CompatibleProviderConfig hooks (SetHeaders,
+// AdaptChatRequest, ChatRequestHeaders, RequestMutator), not in copies of
+// the transport methods.
 type CompatibleProvider struct {
-	client         *llmclient.Client
-	apiKey         string
-	providerName   string
-	requestMutator RequestMutator
+	client *llmclient.Client
+	// keys resolves the credential for each outbound request. Providers in this
+	// package read it directly (see realtime.go) so a websocket dial picks up
+	// the same rotation as the HTTP endpoints.
+	keys               *providers.Keyring
+	providerName       string
+	requestMutator     RequestMutator
+	adaptChatRequest   func(*core.ChatRequest) (*core.ChatRequest, error)
+	chatRequestHeaders func(context.Context, *core.ChatRequest) http.Header
 }
 
 func NewCompatibleProvider(apiKey string, opts providers.ProviderOptions, cfg CompatibleProviderConfig) *CompatibleProvider {
 	p := &CompatibleProvider{
-		apiKey:         apiKey,
-		providerName:   cfg.ProviderName,
-		requestMutator: cfg.RequestMutator,
+		keys:               opts.Keyring(apiKey),
+		providerName:       cfg.ProviderName,
+		requestMutator:     cfg.RequestMutator,
+		adaptChatRequest:   cfg.AdaptChatRequest,
+		chatRequestHeaders: cfg.ChatRequestHeaders,
 	}
 	clientCfg := llmclient.Config{
 		ProviderName:   cfg.ProviderName,
@@ -42,11 +93,18 @@ func NewCompatibleProvider(apiKey string, opts providers.ProviderOptions, cfg Co
 		Hooks:          opts.Hooks,
 		CircuitBreaker: opts.Resilience.CircuitBreaker,
 	}
-	p.client = llmclient.New(clientCfg, func(req *http.Request) {
+	// Resolved per request, not captured: with several keys configured this is
+	// what spreads successive calls across them.
+	headerSetter := func(req *http.Request) {
 		if cfg.SetHeaders != nil {
-			cfg.SetHeaders(req, apiKey)
+			cfg.SetHeaders(req, p.keys.Next())
 		}
-	})
+	}
+	if cfg.HTTPClient != nil {
+		p.client = llmclient.NewWithHTTPClient(cfg.HTTPClient, clientCfg, headerSetter)
+	} else {
+		p.client = llmclient.New(clientCfg, headerSetter)
+	}
 	return p
 }
 
@@ -55,15 +113,17 @@ func NewCompatibleProviderWithHTTPClient(apiKey string, httpClient *http.Client,
 		httpClient = http.DefaultClient
 	}
 	p := &CompatibleProvider{
-		apiKey:         apiKey,
-		providerName:   cfg.ProviderName,
-		requestMutator: cfg.RequestMutator,
+		keys:               providers.NewKeyring(apiKey),
+		providerName:       cfg.ProviderName,
+		requestMutator:     cfg.RequestMutator,
+		adaptChatRequest:   cfg.AdaptChatRequest,
+		chatRequestHeaders: cfg.ChatRequestHeaders,
 	}
 	clientCfg := llmclient.DefaultConfig(cfg.ProviderName, cfg.BaseURL)
 	clientCfg.Hooks = hooks
 	p.client = llmclient.NewWithHTTPClient(httpClient, clientCfg, func(req *http.Request) {
 		if cfg.SetHeaders != nil {
-			cfg.SetHeaders(req, apiKey)
+			cfg.SetHeaders(req, p.keys.Next())
 		}
 	})
 	return p
@@ -99,8 +159,12 @@ func (p *CompatibleProvider) ChatCompletion(ctx context.Context, req *core.ChatR
 	if req == nil {
 		return nil, core.NewInvalidRequestError("chat request is required", nil)
 	}
+	adapted, err := p.adaptedChatRequest(req)
+	if err != nil {
+		return nil, err
+	}
 	var resp core.ChatResponse
-	body, err := chatRequestBody(req)
+	body, err := chatRequestBody(adapted)
 	if err != nil {
 		return nil, err
 	}
@@ -108,6 +172,7 @@ func (p *CompatibleProvider) ChatCompletion(ctx context.Context, req *core.ChatR
 		Method:   http.MethodPost,
 		Endpoint: "/chat/completions",
 		Body:     body,
+		Headers:  p.chatHeaders(ctx, adapted),
 	}, &resp)
 	if err != nil {
 		return nil, err
@@ -120,7 +185,11 @@ func (p *CompatibleProvider) StreamChatCompletion(ctx context.Context, req *core
 	if req == nil {
 		return nil, core.NewInvalidRequestError("chat request is required", nil)
 	}
-	streamReq := req.WithStreaming()
+	adapted, err := p.adaptedChatRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	streamReq := adapted.WithStreaming()
 	body, err := chatRequestBody(streamReq)
 	if err != nil {
 		return nil, err
@@ -129,11 +198,26 @@ func (p *CompatibleProvider) StreamChatCompletion(ctx context.Context, req *core
 		Method:   http.MethodPost,
 		Endpoint: "/chat/completions",
 		Body:     body,
+		Headers:  p.chatHeaders(ctx, streamReq),
 	}))
 	if err != nil {
 		return nil, err
 	}
 	return providers.EnsureChatCompletionSSE(stream), nil
+}
+
+func (p *CompatibleProvider) adaptedChatRequest(req *core.ChatRequest) (*core.ChatRequest, error) {
+	if p.adaptChatRequest == nil {
+		return req, nil
+	}
+	return p.adaptChatRequest(req)
+}
+
+func (p *CompatibleProvider) chatHeaders(ctx context.Context, req *core.ChatRequest) http.Header {
+	if p.chatRequestHeaders == nil {
+		return nil
+	}
+	return p.chatRequestHeaders(ctx, req)
 }
 
 func (p *CompatibleProvider) ListModels(ctx context.Context) (*core.ModelsResponse, error) {
@@ -288,50 +372,20 @@ func (p *CompatibleProvider) CompactResponse(ctx context.Context, req *core.Resp
 }
 
 func responseInputTokensRequestFromResponses(req *core.ResponsesRequest) *core.ResponseInputTokensRequest {
-	if req == nil {
-		return nil
+	utility := req.InputTokensRequest()
+	if utility != nil {
+		// The provider field is a gateway routing hint, never forwarded upstream.
+		utility.Provider = ""
 	}
-	utility := responseUtilityRequestFromResponses(req)
-	return &utility
+	return utility
 }
 
 func responseCompactRequestFromResponses(req *core.ResponsesRequest) *core.ResponseCompactRequest {
-	if req == nil {
-		return nil
+	compact := req.CompactRequest()
+	if compact != nil {
+		compact.Provider = ""
 	}
-	utility := responseUtilityRequestFromResponses(req)
-	compact := core.ResponseCompactRequest(utility)
-	return &compact
-}
-
-func responseUtilityRequestFromResponses(req *core.ResponsesRequest) core.ResponseInputTokensRequest {
-	return core.ResponseInputTokensRequest{
-		Model:                req.Model,
-		Input:                req.Input,
-		Instructions:         req.Instructions,
-		Tools:                req.Tools,
-		ToolChoice:           req.ToolChoice,
-		ParallelToolCalls:    req.ParallelToolCalls,
-		Temperature:          req.Temperature,
-		TopP:                 req.TopP,
-		TopLogprobs:          req.TopLogprobs,
-		MaxOutputTokens:      req.MaxOutputTokens,
-		Metadata:             req.Metadata,
-		Reasoning:            req.Reasoning,
-		Text:                 req.Text,
-		Include:              req.Include,
-		Truncation:           req.Truncation,
-		Store:                req.Store,
-		PreviousResponseID:   req.PreviousResponseID,
-		Conversation:         req.Conversation,
-		Prompt:               req.Prompt,
-		PromptCacheRetention: req.PromptCacheRetention,
-		ContextManagement:    req.ContextManagement,
-		User:                 req.User,
-		ServiceTier:          req.ServiceTier,
-		SafetyIdentifier:     req.SafetyIdentifier,
-		ExtraFields:          core.CloneUnknownJSONFields(req.ExtraFields),
-	}
+	return compact
 }
 
 func (p *CompatibleProvider) Embeddings(ctx context.Context, req *core.EmbeddingRequest) (*core.EmbeddingResponse, error) {
@@ -377,6 +431,23 @@ func (p *CompatibleProvider) CreateBatch(ctx context.Context, req *core.BatchReq
 	if req == nil {
 		return nil, core.NewInvalidRequestError("batch request is required", nil)
 	}
+	// The OpenAI batch API only accepts file-backed input. Inline requests (the
+	// gateway extension used by the Anthropic Message Batches dialect) are
+	// materialized into a JSONL input file first, so inline batches route to
+	// OpenAI-compatible providers the same as everywhere else. The file has the
+	// same lifecycle as a caller-uploaded batch input file.
+	uploadedInputFileID := ""
+	if req.InputFileID == "" && len(req.Requests) > 0 {
+		fileID, err := p.uploadInlineBatchInput(ctx, req.Requests)
+		if err != nil {
+			return nil, err
+		}
+		uploadedInputFileID = fileID
+		fileBacked := *req
+		fileBacked.InputFileID = fileID
+		fileBacked.Requests = nil
+		req = &fileBacked
+	}
 	var resp core.BatchResponse
 	err := p.Do(ctx, llmclient.Request{
 		Method:   http.MethodPost,
@@ -384,10 +455,45 @@ func (p *CompatibleProvider) CreateBatch(ctx context.Context, req *core.BatchReq
 		Body:     req,
 	}, &resp)
 	if err != nil {
+		// Best-effort cleanup: the gateway created the input file, so a failed
+		// batch creation must not leave the caller's request content orphaned
+		// on the provider.
+		if uploadedInputFileID != "" {
+			if _, cleanupErr := p.DeleteFile(ctx, uploadedInputFileID); cleanupErr != nil {
+				slog.Warn("failed to clean up inline batch input file after batch create failure",
+					"provider", p.providerName, "file_id", uploadedInputFileID, "error", cleanupErr)
+			}
+		}
 		return nil, err
 	}
 	providers.EnsureProviderBatchID(&resp)
 	return &resp, nil
+}
+
+// uploadInlineBatchInput renders inline batch items as the OpenAI batch input
+// JSONL and uploads it with purpose "batch".
+func (p *CompatibleProvider) uploadInlineBatchInput(ctx context.Context, items []core.BatchRequestItem) (string, error) {
+	var buf bytes.Buffer
+	for i, item := range items {
+		line, err := json.Marshal(item)
+		if err != nil {
+			return "", core.NewInvalidRequestError(fmt.Sprintf("requests[%d]: %v", i, err), err)
+		}
+		buf.Write(line)
+		buf.WriteByte('\n')
+	}
+	file, err := p.CreateFile(ctx, &core.FileCreateRequest{
+		Purpose:  "batch",
+		Filename: "inline-batch-input.jsonl",
+		Content:  buf.Bytes(),
+	})
+	if err != nil {
+		return "", err
+	}
+	if file == nil || file.ID == "" {
+		return "", core.NewProviderError(p.providerName, http.StatusBadGateway, "batch input file upload returned no file id", nil)
+	}
+	return file.ID, nil
 }
 
 func (p *CompatibleProvider) GetBatch(ctx context.Context, id string) (*core.BatchResponse, error) {

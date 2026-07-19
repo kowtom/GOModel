@@ -15,8 +15,8 @@ import (
 
 	"github.com/goccy/go-json"
 
-	"gomodel/internal/core"
-	"gomodel/internal/llmclient"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/llmclient"
 )
 
 func parseOptionalUnix(ts string) *int64 {
@@ -236,6 +236,18 @@ func (p *Provider) CancelBatch(ctx context.Context, id string) (*core.BatchRespo
 	}
 	mapped.ProviderBatchID = mapped.ID
 	return mapped, nil
+}
+
+// DeleteBatch deletes an ended Anthropic native message batch.
+func (p *Provider) DeleteBatch(ctx context.Context, id string) error {
+	var resp struct {
+		ID   string `json:"id"`
+		Type string `json:"type"`
+	}
+	return p.client.Do(ctx, llmclient.Request{
+		Method:   http.MethodDelete,
+		Endpoint: "/messages/batches/" + url.PathEscape(id),
+	}, &resp)
 }
 
 func (p *Provider) getBatchResults(ctx context.Context, id string, endpointByCustomID map[string]string) (*core.BatchResultsResponse, error) {

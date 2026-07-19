@@ -4,13 +4,14 @@ import (
 	"context"
 	"crypto/subtle"
 	"errors"
+	"net/http"
 	"strings"
 
 	"github.com/labstack/echo/v5"
 
-	"gomodel/internal/auditlog"
-	"gomodel/internal/authkeys"
-	"gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/auditlog"
+	"github.com/enterpilot/gomodel/internal/authkeys"
+	"github.com/enterpilot/gomodel/internal/core"
 )
 
 // BearerTokenAuthenticator authenticates managed bearer tokens and returns
@@ -20,15 +21,10 @@ type BearerTokenAuthenticator interface {
 	Authenticate(ctx context.Context, token string) (authkeys.AuthenticationResult, error)
 }
 
-// AuthMiddleware creates an Echo middleware that validates the master key
-// if it's configured. If masterKey is empty, no authentication is required.
-// skipPaths is a list of paths that should bypass authentication.
-func AuthMiddleware(masterKey string, skipPaths []string) echo.MiddlewareFunc {
-	return AuthMiddlewareWithAuthenticator(masterKey, nil, skipPaths)
-}
-
-// AuthMiddlewareWithAuthenticator validates the legacy master key and, when
-// configured, managed auth keys from the auth key service.
+// AuthMiddlewareWithAuthenticator creates an Echo middleware that validates
+// the legacy master key and, when configured, managed auth keys from the auth
+// key service. If no auth mechanism is configured, no authentication is
+// required. skipPaths is a list of paths that should bypass authentication.
 func AuthMiddlewareWithAuthenticator(masterKey string, authenticator BearerTokenAuthenticator, skipPaths []string, userPathHeader ...string) echo.MiddlewareFunc {
 	userPathHeaderName := configuredUserPathHeaderName(userPathHeader...)
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
@@ -55,21 +51,11 @@ func AuthMiddlewareWithAuthenticator(masterKey string, authenticator BearerToken
 				}
 			}
 
-			// Get Authorization header
-			authHeader := c.Request().Header.Get("Authorization")
-			if authHeader == "" {
-				authErr := authenticationError(c, "missing authorization header")
+			token, tokenErr := requestAuthToken(c.Request())
+			if tokenErr != "" {
+				authErr := authenticationError(c, tokenErr)
 				return writeGatewayError(c, authErr)
 			}
-
-			// Extract Bearer token
-			const prefix = "Bearer "
-			if !strings.HasPrefix(authHeader, prefix) {
-				authErr := authenticationError(c, "invalid authorization header format, expected 'Bearer <token>'")
-				return writeGatewayError(c, authErr)
-			}
-
-			token := strings.TrimPrefix(authHeader, prefix)
 			if masterKey != "" && subtle.ConstantTimeCompare([]byte(token), []byte(masterKey)) == 1 {
 				auditlog.EnrichEntryWithAuthMethod(c, auditlog.AuthMethodMasterKey)
 				return next(c)
@@ -79,18 +65,7 @@ func AuthMiddlewareWithAuthenticator(masterKey string, authenticator BearerToken
 				auditlog.EnrichEntryWithAuthMethod(c, auditlog.AuthMethodAPIKey)
 				authResult, err := authenticator.Authenticate(c.Request().Context(), token)
 				if err == nil {
-					ctx := core.WithAuthKeyID(c.Request().Context(), authResult.ID)
-					if userPath := strings.TrimSpace(authResult.UserPath); userPath != "" {
-						ctx = core.WithEffectiveUserPath(ctx, userPath)
-						ctx = core.WithUserPathHeaderName(ctx, userPathHeaderName)
-						if snapshot := core.GetRequestSnapshot(ctx); snapshot != nil {
-							ctx = core.WithRequestSnapshot(ctx, snapshot.WithUserPathHeader(userPath, userPathHeaderName))
-						}
-						c.Request().Header.Set(userPathHeaderName, userPath)
-						auditlog.EnrichEntryWithUserPath(c, userPath)
-					}
-					c.SetRequest(c.Request().WithContext(ctx))
-					auditlog.EnrichEntryWithAuthKeyID(c, authResult.ID)
+					applyAuthKeyResult(c, authResult, userPathHeaderName)
 					return next(c)
 				}
 
@@ -102,6 +77,47 @@ func AuthMiddlewareWithAuthenticator(masterKey string, authenticator BearerToken
 			return writeGatewayError(c, authErr)
 		}
 	}
+}
+
+// requestAuthToken extracts the caller's credential from the request. The
+// primary scheme is "Authorization: Bearer <token>"; the Anthropic-native
+// "x-api-key: <token>" header is accepted as a fallback so Anthropic SDK
+// clients work without switching their auth configuration. A non-empty
+// errMessage describes why no token could be extracted.
+func requestAuthToken(r *http.Request) (token, errMessage string) {
+	if authHeader := r.Header.Get("Authorization"); authHeader != "" {
+		const prefix = "Bearer "
+		if !strings.HasPrefix(authHeader, prefix) {
+			return "", "invalid authorization header format, expected 'Bearer <token>'"
+		}
+		return strings.TrimPrefix(authHeader, prefix), ""
+	}
+	if apiKey := r.Header.Get("x-api-key"); apiKey != "" {
+		return apiKey, ""
+	}
+	return "", "missing credentials: send 'Authorization: Bearer <token>' or 'x-api-key: <token>'"
+}
+
+// applyAuthKeyResult enriches the request context and audit entry with the
+// authenticated managed key's identity, labels, and bound user path.
+func applyAuthKeyResult(c *echo.Context, authResult authkeys.AuthenticationResult, userPathHeaderName string) {
+	ctx := core.WithAuthKeyID(c.Request().Context(), authResult.ID)
+	if len(authResult.Labels) > 0 {
+		// Key labels join any labels the tagging middleware already
+		// extracted from request headers; duplicates collapse.
+		ctx = core.WithRequestLabels(ctx, core.MergeLabels(core.RequestLabelsFromContext(ctx), authResult.Labels))
+	}
+	if userPath := strings.TrimSpace(authResult.UserPath); userPath != "" {
+		ctx = core.WithEffectiveUserPath(ctx, userPath)
+		ctx = core.WithUserPathHeaderName(ctx, userPathHeaderName)
+		if snapshot := core.GetRequestSnapshot(ctx); snapshot != nil {
+			ctx = core.WithRequestSnapshot(ctx, snapshot.WithUserPathHeader(userPath, userPathHeaderName))
+		}
+		c.Request().Header.Set(userPathHeaderName, userPath)
+		auditlog.EnrichEntryWithUserPath(c, userPath)
+	}
+	c.SetRequest(c.Request().WithContext(ctx))
+	auditlog.EnrichEntryWithAuthKeyID(c, authResult.ID)
 }
 
 func authFailureMessage(err error) string {

@@ -10,10 +10,10 @@ import (
 
 	"github.com/google/uuid"
 
-	batchstore "gomodel/internal/batch"
-	"gomodel/internal/batchrewrite"
-	"gomodel/internal/core"
-	"gomodel/internal/usage"
+	batchstore "github.com/enterpilot/gomodel/internal/batch"
+	"github.com/enterpilot/gomodel/internal/batchrewrite"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/usage"
 )
 
 // BatchConfig configures native batch orchestration.
@@ -203,7 +203,7 @@ func (o *BatchOrchestrator) Create(ctx context.Context, req *core.BatchRequest, 
 			RequestID:                 strings.TrimSpace(meta.RequestID),
 			UserPath:                  core.UserPathFromContext(ctx),
 			WorkflowVersionID:         workflowVersionID(workflow),
-			UsageEnabled:              boolPtr(workflow == nil || workflow.UsageEnabled()),
+			UsageEnabled:              new(workflow == nil || workflow.UsageEnabled()),
 		}
 		if err := o.batchStore.Create(ctx, stored); err != nil {
 			o.rollbackPreparedBatch(ctx, providerType, batchPreparation, providerBatchID)
@@ -397,6 +397,49 @@ func (o *BatchOrchestrator) Cancel(ctx context.Context, id string) (*BatchResult
 	return &BatchResult{Batch: stored.Batch, ProviderType: stored.Batch.Provider}, nil
 }
 
+// Delete removes an ended batch from the upstream provider (when its batch API
+// supports deletion) and from the gateway store. Batches still processing must
+// be canceled first, matching the Anthropic Message Batches contract.
+func (o *BatchOrchestrator) Delete(ctx context.Context, id string) (*BatchResult, error) {
+	stored, err := o.requireStoredBatch(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	// Refresh from upstream first so a batch that ended since the last poll is
+	// deletable without an interim Get call.
+	nativeRouter, hasUpstream := o.provider.(core.NativeBatchRoutableProvider)
+	if hasUpstream && stored.Batch.Provider != "" && stored.Batch.ProviderBatchID != "" {
+		if latest, err := nativeRouter.GetBatch(ctx, stored.Batch.Provider, stored.Batch.ProviderBatchID); err == nil && latest != nil {
+			MergeStoredBatchFromUpstream(stored, latest)
+		}
+	}
+	if !IsTerminalBatchStatus(stored.Batch.Status) {
+		return nil, core.NewInvalidRequestError(
+			"batch is still processing (status: "+stored.Batch.Status+"); cancel it or wait for it to end before deleting", nil)
+	}
+
+	if deleteRouter, ok := o.provider.(core.NativeBatchDeleteRoutableProvider); ok &&
+		stored.Batch.Provider != "" && stored.Batch.ProviderBatchID != "" {
+		if err := deleteRouter.DeleteBatch(ctx, stored.Batch.Provider, stored.Batch.ProviderBatchID); err != nil &&
+			!errors.Is(err, core.ErrNativeBatchDeleteUnsupported) {
+			return nil, err
+		}
+	}
+
+	if o.cleanupStoredBatchRewrittenInputFile != nil {
+		o.cleanupStoredBatchRewrittenInputFile(ctx, stored)
+	}
+	if err := o.batchStore.Delete(ctx, id); err != nil {
+		if errors.Is(err, batchstore.ErrNotFound) {
+			return nil, core.NewNotFoundError("batch not found: " + id)
+		}
+		return nil, core.NewProviderError("batch_store", http.StatusInternalServerError, "failed to delete batch", err)
+	}
+
+	return &BatchResult{Batch: stored.Batch, ProviderType: stored.Batch.Provider}, nil
+}
+
 // Results returns native batch output items and persists result/usage refreshes.
 func (o *BatchOrchestrator) Results(ctx context.Context, id, fallbackRequestID string) (*BatchResultsResult, error) {
 	stored, err := o.requireStoredBatch(ctx, id)
@@ -500,8 +543,4 @@ func workflowVersionID(workflow *core.Workflow) string {
 		return ""
 	}
 	return workflow.WorkflowVersionID()
-}
-
-func boolPtr(value bool) *bool {
-	return &value
 }

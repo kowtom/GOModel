@@ -7,27 +7,40 @@ icon: "rocket"
 ## Run GoModel in 30 Seconds
 
 GoModel is an OpenAI-compatible AI gateway. You can connect one endpoint and
-route traffic across OpenAI, Anthropic, Gemini, DeepSeek, xAI, Groq, OpenRouter,
+route traffic across OpenAI, Anthropic, Gemini, DeepSeek, xAI, Groq, OpenRouter, Kilo AI,
 Z.ai, Azure OpenAI, Oracle GenAI, Ollama, and more while keeping auth, audit logs, and
 admin visibility in one place.
 
-### 1. Start GoModel
+### 1. Install and start GoModel
 
-```bash
-docker run --rm -p 8080:8080 \
-  -e LOGGING_ENABLED=true \
-  -e LOGGING_LOG_BODIES=true \
-  -e LOG_FORMAT=text \
-  -e LOGGING_LOG_HEADERS=true \
-  -e GOMODEL_MASTER_KEY="change-me" \
-  -e OPENAI_API_KEY="sk-..." \
-  enterpilot/gomodel
-```
+<Tabs>
+  <Tab title="macOS / Linux">
+    ```bash
+    curl -fsSL https://gomodel.enterpilot.io/install.sh | sh
+    GOMODEL_MASTER_KEY="change-me" OPENAI_API_KEY="sk-..." gomodel
+    ```
+  </Tab>
+  <Tab title="Windows">
+    ```powershell
+    irm https://gomodel.enterpilot.io/install.ps1 | iex
+    $env:GOMODEL_MASTER_KEY = "change-me"; $env:OPENAI_API_KEY = "sk-..."; gomodel
+    ```
+  </Tab>
+  <Tab title="Docker">
+    ```bash
+    docker run --rm -p 8080:8080 \
+      -e LOG_FORMAT=text \
+      -e GOMODEL_MASTER_KEY="change-me" \
+      -e OPENAI_API_KEY="sk-..." \
+      enterpilot/gomodel
+    ```
+  </Tab>
+</Tabs>
 
 <Note>
   Set at least one provider credential or base URL
   (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`,
-  `DEEPSEEK_API_KEY`, `XAI_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`,
+  `DEEPSEEK_API_KEY`, `XAI_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`, `KILO_API_KEY`,
   `ZAI_API_KEY`, `AZURE_API_KEY` + `AZURE_BASE_URL`,
   `ORACLE_API_KEY` + `ORACLE_BASE_URL`,
   `OLLAMA_BASE_URL`) or GoModel will have no models to route. GoModel also

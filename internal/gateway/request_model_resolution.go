@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/core"
 )
 
 type modelCountProvider interface {
@@ -54,11 +54,6 @@ func WorkflowProviderNameForType(provider core.RoutableProvider, providerType st
 		return strings.TrimSpace(named.GetProviderNameForType(providerType))
 	}
 	return ""
-}
-
-// ResolveRequestModel resolves a requested selector into a concrete provider/model selector.
-func ResolveRequestModel(provider core.RoutableProvider, resolver ModelResolver, requested core.RequestedModelSelector) (*core.RequestModelResolution, error) {
-	return ResolveRequestModelWithAuthorizer(context.Background(), provider, resolver, nil, requested)
 }
 
 // ResolveRequestModelWithAuthorizer resolves and validates a requested selector.

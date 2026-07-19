@@ -11,8 +11,8 @@ import (
 	"strconv"
 	"strings"
 
-	"gomodel/internal/core"
-	"gomodel/internal/llmclient"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/llmclient"
 )
 
 func validatedOpenAICompatibleFileID(client *llmclient.Client, id string) (string, error) {
@@ -33,10 +33,6 @@ func prepareOpenAICompatibleRequest(prepare openAICompatibleRequestPreparer, req
 		return req
 	}
 	return prepare(req)
-}
-
-func doOpenAICompatibleFileIDRequest[T any](ctx context.Context, client *llmclient.Client, method, id string, defaultObject string) (*T, error) {
-	return doOpenAICompatibleFileIDRequestWithPreparer[T](ctx, client, method, id, defaultObject, nil)
 }
 
 func doOpenAICompatibleFileIDRequestWithPreparer[T any](ctx context.Context, client *llmclient.Client, method, id string, defaultObject string, prepare openAICompatibleRequestPreparer) (*T, error) {

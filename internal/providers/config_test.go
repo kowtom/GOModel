@@ -1,10 +1,11 @@
 package providers
 
 import (
+	"slices"
 	"testing"
 	"time"
 
-	"gomodel/config"
+	"github.com/enterpilot/gomodel/config"
 )
 
 var globalRetry = config.RetryConfig{
@@ -40,6 +41,9 @@ var testDiscoveryConfigs = map[string]DiscoveryConfig{
 	"openrouter": {
 		DefaultBaseURL: "https://openrouter.ai/api/v1",
 	},
+	"kilo": {
+		DefaultBaseURL: "https://api.kilo.ai/api/gateway",
+	},
 	"zai": {
 		DefaultBaseURL: "https://api.z.ai/api/paas/v4",
 	},
@@ -54,12 +58,18 @@ var testDiscoveryConfigs = map[string]DiscoveryConfig{
 	"bedrock": {
 		AllowAPIKeyless: true,
 	},
+	"bedrock-mantle": {
+		AllowAPIKeyless: true,
+	},
 	"oracle": {
 		RequireBaseURL: true,
 	},
 	"ollama": {
 		DefaultBaseURL:  "http://localhost:11434/v1",
 		AllowAPIKeyless: true,
+	},
+	"kimicode": {
+		DefaultBaseURL: "https://api.kimi.com/coding/v1",
 	},
 }
 
@@ -343,6 +353,55 @@ func TestFilterEmptyProviders_VLLMAllowsKeylessConfig(t *testing.T) {
 	}
 }
 
+func TestSkippedProviderNames_ListsDeclaredButUnresolved(t *testing.T) {
+	declared := map[string]config.RawProviderConfig{
+		"openai":    {Type: "openai", APIKey: "${OPENAI_API_KEY}"},
+		"anthropic": {Type: "anthropic", APIKey: "sk-real"},
+		"vllm-b":    {Type: "vllm"},
+	}
+	resolved := filterEmptyProviders(declared, testDiscoveryConfigs)
+
+	got := skippedProviderNames(declared, resolved)
+	want := []string{"openai"}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("skippedProviderNames() = %v, want %v", got, want)
+	}
+}
+
+func TestProviderOrigins_SplitsConfigFileFromEnv(t *testing.T) {
+	// openai is declared in the config file and overlaid by env vars; it still
+	// counts as coming from the file. groq exists only because of env discovery.
+	declared := map[string]config.RawProviderConfig{
+		"openai": {Type: "openai"},
+		"vllm-b": {Type: "vllm", BaseURL: "http://b:8000/v1"},
+	}
+	resolved := map[string]ProviderConfig{
+		"openai": {Type: "openai"},
+		"vllm-b": {Type: "vllm"},
+		"groq":   {Type: "groq"},
+	}
+
+	fromFile, fromEnv := providerOrigins(declared, resolved)
+	if want := []string{"openai", "vllm-b"}; !slices.Equal(fromFile, want) {
+		t.Fatalf("fromFile = %v, want %v", fromFile, want)
+	}
+	if want := []string{"groq"}; !slices.Equal(fromEnv, want) {
+		t.Fatalf("fromEnv = %v, want %v", fromEnv, want)
+	}
+}
+
+// A misindented providers: section yields no config-file providers, which is the
+// signal an operator needs to see at boot.
+func TestProviderOrigins_NoDeclaredProviders(t *testing.T) {
+	fromFile, fromEnv := providerOrigins(nil, map[string]ProviderConfig{"openai": {Type: "openai"}})
+	if len(fromFile) != 0 {
+		t.Fatalf("fromFile = %v, want empty", fromFile)
+	}
+	if want := []string{"openai"}; !slices.Equal(fromEnv, want) {
+		t.Fatalf("fromEnv = %v, want %v", fromEnv, want)
+	}
+}
+
 func TestFilterEmptyProviders_EmptyMap(t *testing.T) {
 	got := filterEmptyProviders(map[string]config.RawProviderConfig{}, testDiscoveryConfigs)
 	if len(got) != 0 {
@@ -453,6 +512,26 @@ func TestApplyProviderEnvVars_DiscoversOpenRouterFromAPIKey(t *testing.T) {
 	}
 	if p.BaseURL != testDiscoveryConfigs["openrouter"].DefaultBaseURL {
 		t.Errorf("BaseURL = %q, want %q", p.BaseURL, testDiscoveryConfigs["openrouter"].DefaultBaseURL)
+	}
+}
+
+func TestApplyProviderEnvVars_DiscoversKiloFromAPIKey(t *testing.T) {
+	t.Setenv("KILO_API_KEY", "kilo-key")
+
+	got := applyProviderEnvVars(map[string]config.RawProviderConfig{}, testDiscoveryConfigs)
+
+	p, exists := got["kilo"]
+	if !exists {
+		t.Fatal("expected kilo to be discovered from env var")
+	}
+	if p.APIKey != "kilo-key" {
+		t.Errorf("APIKey = %q, want kilo-key", p.APIKey)
+	}
+	if p.Type != "kilo" {
+		t.Errorf("Type = %q, want kilo", p.Type)
+	}
+	if p.BaseURL != testDiscoveryConfigs["kilo"].DefaultBaseURL {
+		t.Errorf("BaseURL = %q, want %q", p.BaseURL, testDiscoveryConfigs["kilo"].DefaultBaseURL)
 	}
 }
 
@@ -584,6 +663,25 @@ func TestApplyProviderEnvVars_DiscoversSuffixedVertexProvider(t *testing.T) {
 	}
 	if len(bedrock.Models) != 1 || bedrock.Models[0].ID != "anthropic.claude-3-5-haiku-20241022-v1:0" {
 		t.Fatalf("Bedrock Models = %v, want [anthropic.claude-3-5-haiku-20241022-v1:0]", bedrock.Models)
+	}
+}
+
+func TestApplyProviderEnvVars_DiscoversBedrockMantle(t *testing.T) {
+	t.Setenv("BEDROCK_MANTLE_API_KEY", "ABSK-test")
+	t.Setenv("BEDROCK_MANTLE_BASE_URL", "us-east-2")
+	t.Setenv("BEDROCK_MANTLE_API_MODE", "auto")
+	t.Setenv("BEDROCK_MANTLE_MODELS", "openai.gpt-5.6-sol,openai.gpt-5.6-terra")
+
+	got := applyProviderEnvVars(map[string]config.RawProviderConfig{}, testDiscoveryConfigs)
+	p, exists := got["bedrock-mantle"]
+	if !exists {
+		t.Fatal("expected bedrock-mantle to be discovered from BEDROCK_MANTLE_* env vars")
+	}
+	if p.Type != "bedrock-mantle" || p.APIKey != "ABSK-test" || p.BaseURL != "us-east-2" || p.APIMode != "auto" {
+		t.Fatalf("bedrock-mantle config = %+v", p)
+	}
+	if len(p.Models) != 2 || p.Models[0].ID != "openai.gpt-5.6-sol" || p.Models[1].ID != "openai.gpt-5.6-terra" {
+		t.Fatalf("bedrock-mantle models = %v", p.Models)
 	}
 }
 
@@ -1240,6 +1338,25 @@ func TestApplyProviderEnvVars_SuffixedEnvOverlaysMatchingYAMLProvider(t *testing
 	}
 	if *p.Resilience.Retry.MaxRetries != 10 {
 		t.Errorf("MaxRetries = %d, want 10", *p.Resilience.Retry.MaxRetries)
+	}
+}
+
+// providerEnvNames mirrors the env-var naming convention applied by
+// applyProviderEnvVars, so tests can clear ambient variables per provider.
+type providerEnvNames struct {
+	APIKey     string
+	BaseURL    string
+	APIVersion string
+	Models     string
+}
+
+func derivedEnvNames(providerType string) providerEnvNames {
+	prefix := envPrefix(providerType)
+	return providerEnvNames{
+		APIKey:     prefix + "_API_KEY",
+		BaseURL:    prefix + "_BASE_URL",
+		APIVersion: prefix + "_API_VERSION",
+		Models:     prefix + "_MODELS",
 	}
 }
 

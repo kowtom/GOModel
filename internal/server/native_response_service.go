@@ -11,10 +11,10 @@ import (
 
 	"github.com/labstack/echo/v5"
 
-	"gomodel/internal/auditlog"
-	"gomodel/internal/core"
-	"gomodel/internal/gateway"
-	"gomodel/internal/responsestore"
+	"github.com/enterpilot/gomodel/internal/auditlog"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/gateway"
+	"github.com/enterpilot/gomodel/internal/responsestore"
 )
 
 // nativeResponseService owns Responses lifecycle and utility endpoints. Create
@@ -538,10 +538,7 @@ func paginateStoredResponseInputItems(items []json.RawMessage, params core.Respo
 		limit = 100
 	}
 
-	remaining := count - start
-	if remaining < 0 {
-		remaining = 0
-	}
+	remaining := max(count-start, 0)
 	hasMore := remaining > limit
 	if remaining > limit {
 		remaining = limit

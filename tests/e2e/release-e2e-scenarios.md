@@ -1,6 +1,6 @@
 # Release E2E Curl Matrix
 
-This file contains 141 end-to-end curl scenarios for release validation.
+This file contains 172 end-to-end curl scenarios for release validation.
 These scenarios are prepared for execution across these local gateways:
 
 - `http://localhost:18080` - SQLite-backed main test gateway
@@ -8,6 +8,9 @@ These scenarios are prepared for execution across these local gateways:
 - `http://localhost:18082` - MongoDB-backed smoke gateway
 - `http://localhost:18083` - SQLite-backed guardrail gateway
 - `http://localhost:18084` - SQLite-backed auth + exact-cache gateway
+- `http://localhost:18090` - mock MCP upstream (`tests/e2e/mockmcp`, started by
+  the stack manager; `/alpha` requires the `X-Mock-Token` header, `/beta` is
+  open)
 
 ## Recommended runner
 
@@ -56,10 +59,55 @@ Stateful note:
   scenario creates `$QA_SUFFIX`-scoped dashboard mappings and deletes them, and
   `S137` calls reset (which clears all dashboard-managed failover mappings), so
   they are self-contained and rerunnable in any order
+- `S142`-`S148` exercise header tagging (admin rule CRUD, validation negatives,
+  label extraction onto usage entries and audit `data.labels`, streaming,
+  PostgreSQL/MongoDB backend parity, and auth gating); each scenario uses
+  `$QA_SUFFIX`-scoped header names and restores an empty operator rule set, so
+  they are self-contained and rerunnable in any order. Env/config-managed rules
+  and `do_not_pass` passthrough stripping need gateways booted with custom
+  config plus a mock upstream, so they are covered by Go unit tests rather than
+  this running-stack matrix
+- `S149`-`S154` are post-v0.1.48 provider regressions (DeepSeek, Ollama,
+  Fireworks through the shared OpenAI-compatible core); they are read-only and
+  rerunnable in any order. `S151`/`S152` need a local Ollama server with at
+  least one chat model and `S153`/`S154` need an active Fireworks account —
+  each prints a loud `SKIPPED:` line and exits 0 when its upstream dependency
+  is unavailable, and fails on any gateway-side problem
+- `S155`-`S159` exercise scoped rate limits (admin CRUD, user-path request and
+  token enforcement, model-scope saturation, auth gating); each creates
+  `$QA_SUFFIX`-scoped probe rules and deletes them, so they are
+  self-contained, but `S158` saturates `deepseek/deepseek-v4-flash` for up to
+  one minute after it runs
+- `S163`-`S172` exercise the MCP gateway (admin CRUD with secret redaction,
+  aggregation/namespacing, tools/prompts/resources relay, usage and audit
+  logging with JSON-RPC bodies, identity-bound sessions, store parity on
+  PostgreSQL/MongoDB) plus provider `request_health` on
+  `/admin/providers/status`; each scenario registers `$QA_SUFFIX`-scoped
+  servers against the local mock MCP upstream on port 18090 and deletes them,
+  so they are self-contained and rerunnable in any order
+- `S160`-`S162` exercise `/v1/conversations` CRUD, responses/conversations
+  persistence on the PostgreSQL and MongoDB backends, and the rewrite-savings
+  usage summary fields; they clean up after themselves and are rerunnable in
+  any order
 - IaC virtual-models behavior (declarative `VIRTUAL_MODELS`/`config.yaml`,
   managed read-only, env-over-YAML, startup validation) needs gateways launched
   with custom config, so it is covered by a standalone script rather than this
   running-stack matrix
+- `S173`-`S182` exercise the Anthropic Messages drop-in compatibility fixes
+  (`x-api-key` auth fallback, `stop_sequence`, seeded stream usage,
+  dialect-aware `/v1/models` and 404s); `S173`-`S175` need the auth-enabled
+  gateway (`$AUTH_BASE_URL`), the rest are read-mostly on `$BASE_URL` and
+  rerunnable in any order
+- `S183`-`S191` exercise the Anthropic Message Batches API
+  (`/v1/messages/batches*`); each creates its own `msgbatch_`-scoped batch and
+  is rerunnable in any order, but (like `S47`-`S48`) they leave
+  `in_progress`/`canceling` batches behind since the scenarios do not wait for
+  a real provider batch to end. Bedrock Mantle (`internal/providers/bedrockmantle`)
+  has no running-stack coverage here: no `BEDROCK_MANTLE_API_KEY`/AWS
+  credentials are available in `.env`, so it is covered by its unit test suite
+  (`config_test.go`, `bedrock_mantle_test.go`) plus a one-off manual check that
+  a `BEDROCK_MANTLE_*`-prefixed provider registers distinctly from `BEDROCK_*`
+  at startup without colliding or crashing
 - For stateful partial reruns, prefer a contiguous range that includes the
   prerequisite setup scenarios, or rerun with the same `--qa-suffix` and
   `--keep-artifacts`
@@ -225,6 +273,101 @@ assert_embeddings_response() {
     and (.usage.total_tokens | type == "number")
     and (.usage.total_tokens >= $min_total_tokens)
   ' "$file" >/dev/null
+}
+
+export MCP_UPSTREAM_BASE="${MCP_UPSTREAM_BASE:-http://localhost:18090}"
+export MCP_UPSTREAM_TOKEN="${MCP_UPSTREAM_TOKEN:-qa-mock-mcp-secret}"
+# Slug-safe names (lowercase alnum + dashes), so name == derived slug and the
+# DELETE path and {server}_{tool} namespacing can use them directly.
+export QA_MCP_ALPHA="qa-alpha-$QA_SUFFIX"
+export QA_MCP_BETA="qa-beta-$QA_SUFFIX"
+
+# Posts one JSON-RPC frame to an MCP endpoint and prints the decoded reply
+# frames (SSE data lines stripped; plain JSON passed through).
+# usage: mcp_post URL SESSION_ID JSON [extra curl args...]
+mcp_post() {
+  local url="$1" session="$2" body="$3"
+  shift 3
+  local args=(-sS "$url"
+    -H 'Content-Type: application/json'
+    -H 'Accept: application/json, text/event-stream'
+    -H 'MCP-Protocol-Version: 2025-06-18'
+    -d "$body")
+  if [ -n "$session" ]; then
+    args+=(-H "Mcp-Session-Id: $session")
+  fi
+  curl "${args[@]}" "$@" | sed -n -e 's/^data: //p' -e t -e '/^{/p'
+}
+
+# Runs the MCP initialize handshake and prints the assigned session id.
+# usage: mcp_initialize URL HEADERS_FILE BODY_FILE [extra curl args...]
+mcp_initialize() {
+  local url="$1" headers_file="$2" body_file="$3"
+  shift 3
+  curl -sS -D "$headers_file" -o "$body_file" "$url" \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json, text/event-stream' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"qa-release","version":"1"}}}' \
+    "$@"
+  grep -i '^mcp-session-id:' "$headers_file" | awk '{print $2}' | tr -d '\r'
+}
+
+# Sends notifications/initialized to finish the handshake.
+# usage: mcp_initialized URL SESSION_ID [extra curl args...]
+mcp_initialized() {
+  local url="$1" session="$2"
+  shift 2
+  curl -sS -o /dev/null "$url" \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json, text/event-stream' \
+    -H "Mcp-Session-Id: $session" \
+    -H 'MCP-Protocol-Version: 2025-06-18' \
+    -d '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+    "$@"
+}
+
+# Waits until one admin-registered MCP server reaches the wanted status.
+# usage: mcp_wait_status BASE_URL SERVER_NAME WANTED_STATUS
+mcp_wait_status() {
+  local base="$1" name="$2" wanted="$3"
+  for _ in $(seq 1 20); do
+    if curl -fsS "$base/admin/mcp-servers" \
+      | jq -e --arg n "$name" --arg s "$wanted" 'any(.[]?; .name == $n and .status == $s)' >/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "error: MCP server $name did not reach status $wanted on $base" >&2
+  curl -fsS "$base/admin/mcp-servers" | jq . >&2 || true
+  exit 1
+}
+
+# Registers the token-gated alpha and open beta mock upstreams on one gateway
+# and waits for both to connect.
+# usage: mcp_register_release_servers BASE_URL
+mcp_register_release_servers() {
+  local base="$1"
+  curl -fsS -X PUT "$base/admin/mcp-servers" \
+    -H 'Content-Type: application/json' \
+    -d "{\"name\":\"$QA_MCP_ALPHA\",\"url\":\"$MCP_UPSTREAM_BASE/alpha\",\"transport\":\"http\",\"headers\":{\"X-Mock-Token\":\"$MCP_UPSTREAM_TOKEN\"},\"description\":\"qa release alpha\"}" \
+    > "$QA_RUN_DIR/mcp-alpha.json"
+  curl -fsS -X PUT "$base/admin/mcp-servers" \
+    -H 'Content-Type: application/json' \
+    -d "{\"name\":\"$QA_MCP_BETA\",\"url\":\"$MCP_UPSTREAM_BASE/beta\",\"transport\":\"http\",\"description\":\"qa release beta\"}" \
+    > "$QA_RUN_DIR/mcp-beta.json"
+  export QA_MCP_ALPHA_SLUG QA_MCP_BETA_SLUG
+  QA_MCP_ALPHA_SLUG=$(jq -er '.slug' "$QA_RUN_DIR/mcp-alpha.json")
+  QA_MCP_BETA_SLUG=$(jq -er '.slug' "$QA_RUN_DIR/mcp-beta.json")
+  mcp_wait_status "$base" "$QA_MCP_ALPHA" connected
+  mcp_wait_status "$base" "$QA_MCP_BETA" connected
+}
+
+# Deletes the QA MCP servers; safe to call when they do not exist.
+# usage: mcp_cleanup_release_servers BASE_URL
+mcp_cleanup_release_servers() {
+  local base="$1"
+  curl -sS -o /dev/null -X DELETE "$base/admin/mcp-servers/$QA_MCP_ALPHA" || true
+  curl -sS -o /dev/null -X DELETE "$base/admin/mcp-servers/$QA_MCP_BETA" || true
 }
 
 run_release_budget_enforcement() {
@@ -2929,4 +3072,1502 @@ curl -sS -o /dev/null -w '%{http_code}' "$AUTH_BASE_URL/admin/failover" \
   | jq -R -e '. == "401"' >/dev/null
 curl -fsS "$AUTH_BASE_URL/admin/failover" -H "$ADMIN_AUTH_HEADER" \
   | jq -e 'type == "array"' >/dev/null
+```
+
+### S142 Tagging settings CRUD, canonicalization, and validation negatives
+
+Operator tagging rules are readable and replaceable through the admin API:
+header names are canonicalized, the default delimiter is applied, and
+credential-bearing, duplicate, or malformed headers are rejected with `400`
+without clobbering the saved rule set. The scenario restores an empty operator
+rule set at the end.
+
+```bash
+TAG_HDR_RAW="x-qa-tag-$QA_SUFFIX"
+TAG_HDR="X-Qa-Tag-$QA_SUFFIX"
+curl -fsS "$BASE_URL/admin/tagging/settings" \
+  | jq -e '.editable == true and ((.headers // []) | type == "array")' >/dev/null
+curl -fsS -X PUT "$BASE_URL/admin/tagging/settings" \
+  -H 'Content-Type: application/json' \
+  -d "{\"headers\":[{\"header\":\"$TAG_HDR_RAW\",\"prefix\":\"qa-\",\"do_not_pass\":true,\"delimiter\":\";\"},{\"header\":\"$TAG_HDR_RAW-b\"}]}" \
+  | jq -e --arg h "$TAG_HDR" '
+      ([.headers[] | select(.managed | not)] | length) == 2
+      and (.headers[0].header | ascii_downcase) == ($h | ascii_downcase)
+      and .headers[0].prefix == "qa-"
+      and .headers[0].do_not_pass == true
+      and .headers[0].delimiter == ";"
+      and (.headers[1].header | ascii_downcase) == (($h + "-b") | ascii_downcase)
+      and .headers[1].delimiter == ","
+      and ((.headers[1].do_not_pass // false) == false)
+    ' >/dev/null
+curl -fsS "$BASE_URL/admin/tagging/settings" \
+  | jq -e --arg h "$TAG_HDR" 'any(.headers[]; (.header | ascii_downcase) == ($h | ascii_downcase) and .do_not_pass == true)' >/dev/null
+for BAD in \
+  '{"headers":[{"header":"Authorization"}]}' \
+  '{"headers":[{"header":"Cookie"}]}' \
+  '{"headers":[{"header":"x-api-key"}]}' \
+  "{\"headers\":[{\"header\":\"$TAG_HDR_RAW\"},{\"header\":\"$TAG_HDR\"}]}" \
+  '{"headers":[{"header":"bad header name"}]}'; do
+  STATUS=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT "$BASE_URL/admin/tagging/settings" \
+    -H 'Content-Type: application/json' -d "$BAD")
+  [ "$STATUS" = "400" ]
+done
+curl -fsS "$BASE_URL/admin/tagging/settings" \
+  | jq -e '([.headers[] | select(.managed | not)] | length) == 2' >/dev/null
+curl -fsS -X PUT "$BASE_URL/admin/tagging/settings" \
+  -H 'Content-Type: application/json' -d '{"headers":[]}' \
+  | jq -e '((.headers // []) | map(select(.managed | not)) | length) == 0' >/dev/null
+```
+
+### S143 Chat request labels land on the usage entry
+
+Labels are extracted with prefix trimming (values without the prefix are kept
+as-is), custom delimiters, repeated header values, and cross-rule dedupe, and
+are recorded on the usage entry in rule order.
+
+```bash
+TEAM_HDR="X-Qa-Team-$QA_SUFFIX"
+ENV_HDR="X-Qa-Env-$QA_SUFFIX"
+RID="qa-tag-usage-$QA_SUFFIX"
+curl -fsS -X PUT "$BASE_URL/admin/tagging/settings" \
+  -H 'Content-Type: application/json' \
+  -d "{\"headers\":[{\"header\":\"$TEAM_HDR\",\"prefix\":\"team-\"},{\"header\":\"$ENV_HDR\",\"delimiter\":\";\"}]}" >/dev/null
+curl -fsS "$BASE_URL/v1/chat/completions" -H 'Content-Type: application/json' \
+  -H "X-Request-ID: $RID" \
+  -H "$TEAM_HDR: team-alpha, beta ,team-alpha" \
+  -H "$TEAM_HDR: team-gamma" \
+  -H "$ENV_HDR: prod;staging" \
+  -d '{"model":"gpt-4.1-nano","messages":[{"role":"user","content":"Reply with exactly QA_TAG_USAGE_OK"}],"max_tokens":20}' >/dev/null
+USAGE_FILE="$QA_RUN_DIR/s143.usage.json"
+for _ in $(seq 1 15); do
+  curl -fsS "$BASE_URL/admin/usage/log?search=$RID&limit=3" > "$USAGE_FILE"
+  if jq -e --arg r "$RID" 'any(.entries[]?; .request_id == $r and (.total_tokens // 0) > 0)' "$USAGE_FILE" >/dev/null; then
+    break
+  fi
+  sleep 1
+done
+jq -e --arg r "$RID" '
+  any(.entries[]?; .request_id == $r
+    and .labels == ["alpha","beta","gamma","prod","staging"])
+' "$USAGE_FILE" >/dev/null
+curl -fsS -X PUT "$BASE_URL/admin/tagging/settings" \
+  -H 'Content-Type: application/json' -d '{"headers":[]}' >/dev/null
+```
+
+### S144 Audit log records request labels in `data.labels`
+
+The audit entry for a labelled request carries the extracted labels in
+`data.labels`, with the prefix trimmed.
+
+```bash
+AUD_HDR="X-Qa-Audit-$QA_SUFFIX"
+RID="qa-tag-audit-$QA_SUFFIX"
+curl -fsS -X PUT "$BASE_URL/admin/tagging/settings" \
+  -H 'Content-Type: application/json' \
+  -d "{\"headers\":[{\"header\":\"$AUD_HDR\",\"prefix\":\"aud-\"}]}" >/dev/null
+curl -fsS "$BASE_URL/v1/chat/completions" -H 'Content-Type: application/json' \
+  -H "X-Request-ID: $RID" \
+  -H "$AUD_HDR: aud-billing, aud-experiment" \
+  -d '{"model":"gpt-4.1-nano","messages":[{"role":"user","content":"Reply with exactly QA_TAG_AUDIT_OK"}],"max_tokens":20}' >/dev/null
+AUDIT_FILE="$QA_RUN_DIR/s144.audit.json"
+for _ in $(seq 1 15); do
+  curl -fsS "$BASE_URL/admin/audit/log?search=$RID&limit=3" > "$AUDIT_FILE"
+  if jq -e --arg r "$RID" 'any(.entries[]?; .request_id == $r)' "$AUDIT_FILE" >/dev/null; then
+    break
+  fi
+  sleep 1
+done
+jq -e --arg r "$RID" '
+  any(.entries[]?; .request_id == $r and .data.labels == ["billing","experiment"])
+' "$AUDIT_FILE" >/dev/null
+curl -fsS -X PUT "$BASE_URL/admin/tagging/settings" \
+  -H 'Content-Type: application/json' -d '{"headers":[]}' >/dev/null
+```
+
+### S145 Streaming chat records labels on the usage entry
+
+Labels ride the shared stream observers, so a streamed completion records them
+on its usage entry too.
+
+```bash
+STREAM_HDR="X-Qa-Stream-$QA_SUFFIX"
+RID="qa-tag-stream-$QA_SUFFIX"
+curl -fsS -X PUT "$BASE_URL/admin/tagging/settings" \
+  -H 'Content-Type: application/json' \
+  -d "{\"headers\":[{\"header\":\"$STREAM_HDR\"}]}" >/dev/null
+STREAM_FILE="$QA_RUN_DIR/s145.stream.log"
+curl -fsSN "$BASE_URL/v1/chat/completions" -H 'Content-Type: application/json' \
+  -H "X-Request-ID: $RID" \
+  -H "$STREAM_HDR: sse-check" \
+  -d '{"model":"gpt-4.1-nano","stream":true,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":"Reply with exactly QA_TAG_STREAM_OK"}],"max_tokens":20}' \
+  > "$STREAM_FILE"
+grep -qF 'data: [DONE]' "$STREAM_FILE"
+assert_chat_stream_has_usage "$STREAM_FILE"
+USAGE_FILE="$QA_RUN_DIR/s145.usage.json"
+for _ in $(seq 1 15); do
+  curl -fsS "$BASE_URL/admin/usage/log?search=$RID&limit=3" > "$USAGE_FILE"
+  if jq -e --arg r "$RID" 'any(.entries[]?; .request_id == $r and (.total_tokens // 0) > 0)' "$USAGE_FILE" >/dev/null; then
+    break
+  fi
+  sleep 1
+done
+jq -e --arg r "$RID" '
+  any(.entries[]?; .request_id == $r and .labels == ["sse-check"])
+' "$USAGE_FILE" >/dev/null
+curl -fsS -X PUT "$BASE_URL/admin/tagging/settings" \
+  -H 'Content-Type: application/json' -d '{"headers":[]}' >/dev/null
+```
+
+### S146 Usage labels are recorded on PostgreSQL and MongoDB backends
+
+The tagging settings store and the usage `labels` column exist on all three
+storage backends; this exercises the PostgreSQL and MongoDB gateways.
+
+```bash
+BACKEND_HDR="X-Qa-Backend-$QA_SUFFIX"
+for TARGET in "$PG_BASE_URL|pg" "$MONGO_BASE_URL|mongo"; do
+  URL="${TARGET%%|*}"
+  TAG="${TARGET##*|}"
+  RID="qa-tag-$TAG-$QA_SUFFIX"
+  curl -fsS -X PUT "$URL/admin/tagging/settings" \
+    -H 'Content-Type: application/json' \
+    -d "{\"headers\":[{\"header\":\"$BACKEND_HDR\"}]}" \
+    | jq -e --arg h "$BACKEND_HDR" 'any(.headers[]; (.header | ascii_downcase) == ($h | ascii_downcase))' >/dev/null
+  curl -fsS "$URL/v1/chat/completions" -H 'Content-Type: application/json' \
+    -H "X-Request-ID: $RID" \
+    -H "$BACKEND_HDR: $TAG-check" \
+    -d '{"model":"gpt-4.1-nano","messages":[{"role":"user","content":"Reply with exactly QA_TAG_BACKEND_OK"}],"max_tokens":20}' >/dev/null
+  USAGE_FILE="$QA_RUN_DIR/s146.$TAG.usage.json"
+  for _ in $(seq 1 15); do
+    curl -fsS "$URL/admin/usage/log?search=$RID&limit=3" > "$USAGE_FILE"
+    if jq -e --arg r "$RID" 'any(.entries[]?; .request_id == $r and (.total_tokens // 0) > 0)' "$USAGE_FILE" >/dev/null; then
+      break
+    fi
+    sleep 1
+  done
+  jq -e --arg r "$RID" --arg l "$TAG-check" '
+    any(.entries[]?; .request_id == $r and .labels == [$l])
+  ' "$USAGE_FILE" >/dev/null
+  curl -fsS -X PUT "$URL/admin/tagging/settings" \
+    -H 'Content-Type: application/json' -d '{"headers":[]}' >/dev/null
+done
+```
+
+### S147 No labels are recorded without a matching rule
+
+With an empty operator rule set, a request carrying would-be label headers
+records a usage entry without any `labels` field.
+
+```bash
+RID="qa-tag-norules-$QA_SUFFIX"
+curl -fsS -X PUT "$BASE_URL/admin/tagging/settings" \
+  -H 'Content-Type: application/json' -d '{"headers":[]}' >/dev/null
+curl -fsS "$BASE_URL/v1/chat/completions" -H 'Content-Type: application/json' \
+  -H "X-Request-ID: $RID" \
+  -H "X-Qa-Team-$QA_SUFFIX: team-alpha" \
+  -d '{"model":"gpt-4.1-nano","messages":[{"role":"user","content":"Reply with exactly QA_TAG_NORULES_OK"}],"max_tokens":20}' >/dev/null
+USAGE_FILE="$QA_RUN_DIR/s147.usage.json"
+for _ in $(seq 1 15); do
+  curl -fsS "$BASE_URL/admin/usage/log?search=$RID&limit=3" > "$USAGE_FILE"
+  if jq -e --arg r "$RID" 'any(.entries[]?; .request_id == $r and (.total_tokens // 0) > 0)' "$USAGE_FILE" >/dev/null; then
+    break
+  fi
+  sleep 1
+done
+jq -e --arg r "$RID" '
+  any(.entries[]?; .request_id == $r and (has("labels") | not))
+' "$USAGE_FILE" >/dev/null
+```
+
+### S148 Tagging settings admin requires authentication
+
+On the auth-enabled gateway the tagging settings endpoints are gated behind the
+master key: an unauthenticated read is rejected with `401`, while the same read
+with the admin bearer succeeds.
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}' "$AUTH_BASE_URL/admin/tagging/settings" \
+  | jq -R -e '. == "401"' >/dev/null
+curl -fsS "$AUTH_BASE_URL/admin/tagging/settings" -H "$ADMIN_AUTH_HEADER" \
+  | jq -e '.editable == true and ((.headers // []) | type == "array")' >/dev/null
+```
+
+## 20. Post-v0.1.48 provider regressions
+
+These scenarios cover providers rewired through the shared OpenAI-compatible
+core (`#486`) and the new Fireworks provider (`#475`). DeepSeek scenarios use
+`deepseek-v4-flash`, a reasoning model that needs a generous `max_tokens`
+budget before it emits final content.
+
+### S149 DeepSeek non-streaming chat
+
+Checks translated chat on DeepSeek through the shared OpenAI-compatible core.
+
+```bash
+RESP_FILE="$QA_RUN_DIR/s149.chat.json"
+curl -fsS "$BASE_URL/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"Reply with exactly QA_DEEPSEEK_OK"}],"max_tokens":2000}' \
+  > "$RESP_FILE"
+jq '{model,provider,usage,answer:.choices[0].message.content}' "$RESP_FILE"
+assert_chat_response_contains "$RESP_FILE" "deepseek" "QA_DEEPSEEK_OK"
+```
+
+### S150 DeepSeek streaming chat
+
+Checks SSE chat streaming and the final usage chunk on DeepSeek.
+
+```bash
+SSE_FILE="$QA_RUN_DIR/s150.chat.sse"
+curl -fsS --no-buffer "$BASE_URL/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"deepseek-v4-flash","stream":true,"messages":[{"role":"user","content":"Reply with exactly QA_DEEPSEEK_STREAM_OK"}],"max_tokens":2000}' \
+  > "$SSE_FILE"
+sed -n '1,8p' "$SSE_FILE"
+assert_chat_stream_contains "$SSE_FILE" "QA_DEEPSEEK_STREAM_OK"
+assert_chat_stream_has_usage "$SSE_FILE"
+```
+
+### S151 Ollama local non-streaming chat
+
+Checks translated chat against a local Ollama server through the shared
+OpenAI-compatible core. Skips loudly when no Ollama models are registered
+(local server not running); any gateway-side failure still fails the scenario.
+
+```bash
+OLLAMA_MODEL=$(curl -fsS "$BASE_URL/v1/models" \
+  | jq -r '[.data[].id | select(startswith("ollama/"))] | (map(select(endswith("qwen3:8b"))) + .)[0] // empty')
+if [ -z "$OLLAMA_MODEL" ]; then
+  echo "SKIPPED: no ollama models are registered (local Ollama server unavailable)" >&2
+  exit 0
+fi
+RESP_FILE="$QA_RUN_DIR/s151.chat.json"
+curl -fsS "$BASE_URL/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -d "{\"model\":\"$OLLAMA_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly QA_OLLAMA_OK and nothing else. /no_think\"}],\"max_tokens\":600}" \
+  > "$RESP_FILE"
+jq '{model,provider,usage,answer:.choices[0].message.content}' "$RESP_FILE"
+assert_chat_response_contains "$RESP_FILE" "ollama" "QA_OLLAMA_OK"
+```
+
+### S152 Ollama local streaming chat
+
+Checks SSE chat streaming and the final usage chunk against local Ollama.
+
+```bash
+OLLAMA_MODEL=$(curl -fsS "$BASE_URL/v1/models" \
+  | jq -r '[.data[].id | select(startswith("ollama/"))] | (map(select(endswith("qwen3:8b"))) + .)[0] // empty')
+if [ -z "$OLLAMA_MODEL" ]; then
+  echo "SKIPPED: no ollama models are registered (local Ollama server unavailable)" >&2
+  exit 0
+fi
+SSE_FILE="$QA_RUN_DIR/s152.chat.sse"
+curl -fsS --no-buffer "$BASE_URL/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -d "{\"model\":\"$OLLAMA_MODEL\",\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly QA_OLLAMA_STREAM_OK and nothing else. /no_think\"}],\"max_tokens\":600}" \
+  > "$SSE_FILE"
+sed -n '1,8p' "$SSE_FILE"
+assert_chat_stream_contains "$SSE_FILE" "QA_OLLAMA_STREAM_OK"
+assert_chat_stream_has_usage "$SSE_FILE"
+```
+
+### S153 Fireworks non-streaming chat
+
+Checks translated chat on the Fireworks provider. The provider must always be
+registered; when the upstream account itself is unavailable (suspension,
+billing) the scenario skips loudly instead of failing the release gate on an
+external billing state.
+
+```bash
+STATUS_FILE="$QA_RUN_DIR/s153.fireworks-status.json"
+curl -fsS "$BASE_URL/admin/providers/status" > "$STATUS_FILE"
+jq -e '.providers[] | select(.name == "fireworks") | .runtime.registered == true' "$STATUS_FILE" >/dev/null
+if jq -e '.providers[] | select(.name == "fireworks") | (.status != "healthy") and ((.last_error // "") | test("suspend|billing|payment|quota"; "i"))' "$STATUS_FILE" >/dev/null; then
+  echo "SKIPPED: fireworks upstream account is unavailable (billing/suspension)" >&2
+  exit 0
+fi
+FIREWORKS_MODEL=$(curl -fsS "$BASE_URL/v1/models" \
+  | jq -er '[.data[].id | select(startswith("fireworks/"))] | (map(select(test("llama-v3p1-8b-instruct$"))) + .)[0]')
+RESP_FILE="$QA_RUN_DIR/s153.chat.json"
+curl -fsS "$BASE_URL/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -d "{\"model\":\"$FIREWORKS_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly QA_FIREWORKS_OK\"}],\"max_tokens\":40}" \
+  > "$RESP_FILE"
+jq '{model,provider,usage,answer:.choices[0].message.content}' "$RESP_FILE"
+assert_chat_response_contains "$RESP_FILE" "fireworks" "QA_FIREWORKS_OK"
+```
+
+### S154 Fireworks streaming chat
+
+Checks SSE chat streaming and the final usage chunk on Fireworks, with the
+same loud skip when the upstream account is unavailable.
+
+```bash
+STATUS_FILE="$QA_RUN_DIR/s154.fireworks-status.json"
+curl -fsS "$BASE_URL/admin/providers/status" > "$STATUS_FILE"
+jq -e '.providers[] | select(.name == "fireworks") | .runtime.registered == true' "$STATUS_FILE" >/dev/null
+if jq -e '.providers[] | select(.name == "fireworks") | (.status != "healthy") and ((.last_error // "") | test("suspend|billing|payment|quota"; "i"))' "$STATUS_FILE" >/dev/null; then
+  echo "SKIPPED: fireworks upstream account is unavailable (billing/suspension)" >&2
+  exit 0
+fi
+FIREWORKS_MODEL=$(curl -fsS "$BASE_URL/v1/models" \
+  | jq -er '[.data[].id | select(startswith("fireworks/"))] | (map(select(test("llama-v3p1-8b-instruct$"))) + .)[0]')
+SSE_FILE="$QA_RUN_DIR/s154.chat.sse"
+curl -fsS --no-buffer "$BASE_URL/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -d "{\"model\":\"$FIREWORKS_MODEL\",\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly QA_FIREWORKS_STREAM_OK\"}],\"max_tokens\":40}" \
+  > "$SSE_FILE"
+sed -n '1,8p' "$SSE_FILE"
+assert_chat_stream_contains "$SSE_FILE" "QA_FIREWORKS_STREAM_OK"
+assert_chat_stream_has_usage "$SSE_FILE"
+```
+
+## 21. Scoped rate limits
+
+These scenarios cover the scoped rate-limit feature (`#482`): admin CRUD with
+validation, user-path request and token enforcement, model-scope saturation,
+and auth gating. Rules created here are deleted at the end of each scenario.
+
+### S155 Rate limit admin CRUD and validation
+
+Creates a harmless high provider-scope rule, verifies it is listed, checks
+three validation negatives, and deletes the rule.
+
+```bash
+RULES_FILE="$QA_RUN_DIR/s155.rules.json"
+curl -fsS -X PUT "$BASE_URL/admin/rate-limits" \
+  -H 'Content-Type: application/json' \
+  -d '{"scope":"provider","subject":"openai","limit_key":{"period":"hour"},"max_requests":100000}' \
+  > "$RULES_FILE"
+jq -e '
+  any(.rate_limits[]?; .scope == "provider" and .subject == "openai" and .period_seconds == 3600 and .max_requests == 100000 and .source == "manual")
+  and (.server_time | type == "string")
+' "$RULES_FILE" >/dev/null
+
+BODY_FILE="$QA_RUN_DIR/s155.negative.json"
+curl -sS -o "$BODY_FILE" -w '%{http_code}' -X PUT "$BASE_URL/admin/rate-limits" \
+  -H 'Content-Type: application/json' \
+  -d '{"scope":"provider","subject":"openai","max_requests":10}' \
+  | jq -R -e '. == "400"' >/dev/null
+jq -e '.error.type == "invalid_request_error" and (.error.message | test("limit_key"))' "$BODY_FILE" >/dev/null
+
+curl -sS -o "$BODY_FILE" -w '%{http_code}' -X PUT "$BASE_URL/admin/rate-limits" \
+  -H 'Content-Type: application/json' \
+  -d '{"scope":"provider","subject":"openai","user_path":"/qa/conflict","limit_key":{"period":"hour"},"max_requests":10}' \
+  | jq -R -e '. == "400"' >/dev/null
+jq -e '.error.type == "invalid_request_error" and (.error.message | test("user_path"))' "$BODY_FILE" >/dev/null
+
+curl -sS -o "$BODY_FILE" -w '%{http_code}' -X PUT "$BASE_URL/admin/rate-limits" \
+  -H 'Content-Type: application/json' \
+  -d '{"scope":"provider","subject":"openai","limit_key":{"period":"hour","period_seconds":60},"max_requests":10}' \
+  | jq -R -e '. == "400"' >/dev/null
+jq -e '.error.type == "invalid_request_error" and (.error.message | test("period"))' "$BODY_FILE" >/dev/null
+
+curl -fsS -X DELETE "$BASE_URL/admin/rate-limits" \
+  -H 'Content-Type: application/json' \
+  -d '{"scope":"provider","subject":"openai","limit_key":{"period":"hour"}}' \
+  | jq -e 'all(.rate_limits[]?; (.scope == "provider" and .subject == "openai" and .period_seconds == 3600) | not)' >/dev/null
+```
+
+### S156 User-path request limit enforcement
+
+Creates a one-request-per-minute rule on a QA path, verifies the first request
+passes with `x-ratelimit-*` headers, the second returns `429` with
+`Retry-After` and `code: rate_limit_exceeded`, and that `reset-one` unblocks
+the path again.
+
+```bash
+RL_PATH="/qa/ratelimit/requests/$QA_SUFFIX"
+HEADERS_FILE="$QA_RUN_DIR/s156.headers"
+BODY_FILE="$QA_RUN_DIR/s156.body.json"
+
+curl -fsS -X PUT "$BASE_URL/admin/rate-limits" \
+  -H 'Content-Type: application/json' \
+  -d "{\"user_path\":\"$RL_PATH\",\"limit_key\":{\"period\":\"minute\"},\"max_requests\":1}" \
+  | jq -e --arg p "$RL_PATH" 'any(.rate_limits[]?; .scope == "user_path" and .user_path == $p and .max_requests == 1)' >/dev/null
+
+curl -fsS -D "$HEADERS_FILE" -o "$BODY_FILE" "$BASE_URL/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -H "X-GoModel-User-Path: $RL_PATH/leaf" \
+  -d '{"model":"gpt-4.1-nano","messages":[{"role":"user","content":"Reply with exactly QA_RL_FIRST_OK"}],"max_tokens":20}'
+assert_chat_response_contains "$BODY_FILE" "openai" "QA_RL_FIRST_OK"
+grep -Eiq '^x-ratelimit-limit-requests: *1' "$HEADERS_FILE"
+grep -Eiq '^x-ratelimit-remaining-requests: *0' "$HEADERS_FILE"
+grep -Eiq '^x-ratelimit-reset-requests: *[0-9]+' "$HEADERS_FILE"
+
+curl -sS -D "$HEADERS_FILE" -o "$BODY_FILE" -w '%{http_code}' "$BASE_URL/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -H "X-GoModel-User-Path: $RL_PATH/leaf" \
+  -d '{"model":"gpt-4.1-nano","messages":[{"role":"user","content":"Reply with exactly QA_RL_BLOCKED"}],"max_tokens":20}' \
+  | jq -R -e '. == "429"' >/dev/null
+grep -Eiq '^Retry-After: *[0-9]+' "$HEADERS_FILE"
+jq -e '.error.type == "rate_limit_error" and .error.code == "rate_limit_exceeded" and (.error.message | test("request limit"))' "$BODY_FILE" >/dev/null
+
+curl -fsS -X POST "$BASE_URL/admin/rate-limits/reset-one" \
+  -H 'Content-Type: application/json' \
+  -d "{\"user_path\":\"$RL_PATH\",\"period\":\"minute\"}" >/dev/null
+curl -fsS -o "$BODY_FILE" "$BASE_URL/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -H "X-GoModel-User-Path: $RL_PATH/leaf" \
+  -d '{"model":"gpt-4.1-nano","messages":[{"role":"user","content":"Reply with exactly QA_RL_RESET_OK"}],"max_tokens":20}'
+assert_chat_response_contains "$BODY_FILE" "openai" "QA_RL_RESET_OK"
+
+curl -fsS -X DELETE "$BASE_URL/admin/rate-limits" \
+  -H 'Content-Type: application/json' \
+  -d "{\"user_path\":\"$RL_PATH\",\"limit_key\":{\"period\":\"minute\"}}" \
+  | jq -e --arg p "$RL_PATH" 'all(.rate_limits[]?; .user_path != $p)' >/dev/null
+```
+
+### S157 User-path token limit is post-accounted from usage
+
+Creates a one-token-per-minute rule, verifies the first request passes (token
+windows admit while the window has remaining budget and are charged from usage
+entries afterwards), waits for the charge to land on the rule counters, and
+verifies the next request is blocked with token rate-limit headers.
+
+```bash
+RL_PATH="/qa/ratelimit/tokens/$QA_SUFFIX"
+HEADERS_FILE="$QA_RUN_DIR/s157.headers"
+BODY_FILE="$QA_RUN_DIR/s157.body.json"
+RULES_FILE="$QA_RUN_DIR/s157.rules.json"
+
+curl -fsS -X PUT "$BASE_URL/admin/rate-limits" \
+  -H 'Content-Type: application/json' \
+  -d "{\"user_path\":\"$RL_PATH\",\"limit_key\":{\"period\":\"minute\"},\"max_tokens\":1}" \
+  | jq -e --arg p "$RL_PATH" 'any(.rate_limits[]?; .scope == "user_path" and .user_path == $p and .max_tokens == 1)' >/dev/null
+
+curl -fsS -D "$HEADERS_FILE" -o "$BODY_FILE" "$BASE_URL/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -H "X-GoModel-User-Path: $RL_PATH/leaf" \
+  -d '{"model":"gpt-4.1-nano","messages":[{"role":"user","content":"Reply with exactly QA_RL_TOKENS_OK"}],"max_tokens":20}'
+assert_chat_response_contains "$BODY_FILE" "openai" "QA_RL_TOKENS_OK"
+grep -Eiq '^x-ratelimit-limit-tokens: *1' "$HEADERS_FILE"
+
+for _ in $(seq 1 20); do
+  curl -fsS "$BASE_URL/admin/rate-limits" > "$RULES_FILE"
+  if jq -e --arg p "$RL_PATH" 'any(.rate_limits[]?; .user_path == $p and .tokens_used > 0)' "$RULES_FILE" >/dev/null; then
+    break
+  fi
+  sleep 1
+done
+jq -e --arg p "$RL_PATH" 'any(.rate_limits[]?; .user_path == $p and .tokens_used > 0)' "$RULES_FILE" >/dev/null
+
+curl -sS -D "$HEADERS_FILE" -o "$BODY_FILE" -w '%{http_code}' "$BASE_URL/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -H "X-GoModel-User-Path: $RL_PATH/leaf" \
+  -d '{"model":"gpt-4.1-nano","messages":[{"role":"user","content":"Reply with exactly QA_RL_TOKENS_BLOCKED"}],"max_tokens":20}' \
+  | jq -R -e '. == "429"' >/dev/null
+grep -Eiq '^Retry-After: *[0-9]+' "$HEADERS_FILE"
+grep -Eiq '^x-ratelimit-remaining-tokens: *0' "$HEADERS_FILE"
+jq -e '.error.type == "rate_limit_error" and .error.code == "rate_limit_exceeded" and (.error.message | test("token"))' "$BODY_FILE" >/dev/null
+
+curl -fsS -X DELETE "$BASE_URL/admin/rate-limits" \
+  -H 'Content-Type: application/json' \
+  -d "{\"user_path\":\"$RL_PATH\",\"limit_key\":{\"period\":\"minute\"}}" \
+  | jq -e --arg p "$RL_PATH" 'all(.rate_limits[]?; .user_path != $p)' >/dev/null
+```
+
+### S158 Model-scope saturation returns 429 without alternatives
+
+Pins `deepseek/deepseek-v4-flash` to one request per minute; the second direct
+request has no alternative provider for the model and must be rejected with
+`429` instead of routed elsewhere. Leaves the model saturated for up to one
+minute after the scenario runs.
+
+```bash
+BODY_FILE="$QA_RUN_DIR/s158.body.json"
+
+curl -fsS -X PUT "$BASE_URL/admin/rate-limits" \
+  -H 'Content-Type: application/json' \
+  -d '{"scope":"model","subject":"deepseek/deepseek-v4-flash","limit_key":{"period":"minute"},"max_requests":1}' \
+  | jq -e 'any(.rate_limits[]?; .scope == "model" and .subject == "deepseek/deepseek-v4-flash" and .max_requests == 1)' >/dev/null
+
+curl -fsS -o "$BODY_FILE" "$BASE_URL/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"Reply with exactly QA_RL_MODEL_OK"}],"max_tokens":2000}'
+assert_chat_response_contains "$BODY_FILE" "deepseek" "QA_RL_MODEL_OK"
+
+curl -sS -o "$BODY_FILE" -w '%{http_code}' "$BASE_URL/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"Reply with exactly QA_RL_MODEL_BLOCKED"}],"max_tokens":2000}' \
+  | jq -R -e '. == "429"' >/dev/null
+jq -e '.error.type == "rate_limit_error" and .error.code == "rate_limit_exceeded"' "$BODY_FILE" >/dev/null
+
+curl -fsS -X DELETE "$BASE_URL/admin/rate-limits" \
+  -H 'Content-Type: application/json' \
+  -d '{"scope":"model","subject":"deepseek/deepseek-v4-flash","limit_key":{"period":"minute"}}' \
+  | jq -e 'all(.rate_limits[]?; .subject != "deepseek/deepseek-v4-flash")' >/dev/null
+```
+
+### S159 Rate limit admin requires authentication
+
+On the auth-enabled gateway the rate-limit admin endpoints are gated behind
+the master key.
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}' "$AUTH_BASE_URL/admin/rate-limits" \
+  | jq -R -e '. == "401"' >/dev/null
+curl -fsS "$AUTH_BASE_URL/admin/rate-limits" -H "$ADMIN_AUTH_HEADER" \
+  | jq -e '(.rate_limits | type == "array") and (.server_time | type == "string")' >/dev/null
+```
+
+## 22. Responses and conversations persistence
+
+These scenarios cover `/v1/conversations` CRUD and the persistence of
+responses/conversations snapshots to the configured storage backend (`#488`),
+plus the rewrite-savings usage summary fields (`#481`).
+
+### S160 Conversations lifecycle CRUD
+
+Creates a conversation with seed items and metadata, reads it back, updates
+the metadata, deletes it, and verifies the read-after-delete returns `404`.
+
+```bash
+CONV_FILE="$QA_RUN_DIR/s160.conversation.json"
+curl -fsS -X POST "$BASE_URL/v1/conversations" \
+  -H 'Content-Type: application/json' \
+  -d "{\"metadata\":{\"suite\":\"qa-release-$QA_SUFFIX\"},\"items\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"qa conversation seed\"}]}]}" \
+  > "$CONV_FILE"
+jq '.' "$CONV_FILE"
+jq -e --arg suite "qa-release-$QA_SUFFIX" '
+  .object == "conversation"
+  and (.id | type == "string" and startswith("conv_"))
+  and (.created_at | type == "number")
+  and .metadata.suite == $suite
+' "$CONV_FILE" >/dev/null
+CONV_ID=$(jq -er '.id' "$CONV_FILE")
+
+curl -fsS "$BASE_URL/v1/conversations/$CONV_ID" \
+  | jq -e --arg id "$CONV_ID" --arg suite "qa-release-$QA_SUFFIX" '.id == $id and .object == "conversation" and .metadata.suite == $suite' >/dev/null
+
+curl -fsS -X POST "$BASE_URL/v1/conversations/$CONV_ID" \
+  -H 'Content-Type: application/json' \
+  -d "{\"metadata\":{\"suite\":\"qa-release-$QA_SUFFIX-updated\"}}" \
+  | jq -e --arg suite "qa-release-$QA_SUFFIX-updated" '.metadata.suite == $suite' >/dev/null
+
+curl -fsS -X DELETE "$BASE_URL/v1/conversations/$CONV_ID" \
+  | jq -e --arg id "$CONV_ID" '.id == $id and .object == "conversation.deleted" and .deleted == true' >/dev/null
+
+BODY_FILE="$QA_RUN_DIR/s160.after-delete.json"
+curl -sS -o "$BODY_FILE" -w '%{http_code}' "$BASE_URL/v1/conversations/$CONV_ID" \
+  | jq -R -e '. == "404"' >/dev/null
+jq -e '.error.type == "not_found_error"' "$BODY_FILE" >/dev/null
+```
+
+### S161 Responses and conversations persist on PostgreSQL and MongoDB
+
+Creates a stored response and a conversation on the PostgreSQL and MongoDB
+gateways, reads both back, and cleans up. This covers the persistent
+responses/conversations stores added for the non-SQLite backends.
+
+```bash
+for TARGET in "$PG_BASE_URL|pg" "$MONGO_BASE_URL|mongo"; do
+  URL="${TARGET%%|*}"
+  TAG="${TARGET##*|}"
+
+  CONV_ID=$(curl -fsS -X POST "$URL/v1/conversations" \
+    -H 'Content-Type: application/json' \
+    -d "{\"metadata\":{\"backend\":\"$TAG-$QA_SUFFIX\"}}" | jq -er '.id')
+
+  RESP_FILE="$QA_RUN_DIR/s161.$TAG.response.json"
+  curl -fsS "$URL/v1/responses" \
+    -H 'Content-Type: application/json' \
+    -d "{\"model\":\"gpt-4.1-nano\",\"input\":\"Reply with exactly QA_PERSIST_${TAG}_OK\",\"max_output_tokens\":20}" \
+    > "$RESP_FILE"
+  assert_responses_response_contains "$RESP_FILE" "openai" "QA_PERSIST_${TAG}_OK"
+  RESP_ID=$(jq -er '.id' "$RESP_FILE")
+
+  curl -fsS "$URL/v1/conversations/$CONV_ID" \
+    | jq -e --arg b "$TAG-$QA_SUFFIX" '.object == "conversation" and .metadata.backend == $b' >/dev/null
+  curl -fsS "$URL/v1/responses/$RESP_ID" > "$RESP_FILE.retrieved"
+  jq -e --arg id "$RESP_ID" --arg marker "QA_PERSIST_${TAG}_OK" '
+    .id == $id and .object == "response" and .status == "completed"
+    and any(.output[]?.content[]?; .type == "output_text" and (.text | contains($marker)))
+  ' "$RESP_FILE.retrieved" >/dev/null
+
+  curl -fsS -X DELETE "$URL/v1/responses/$RESP_ID" \
+    | jq -e --arg id "$RESP_ID" '.id == $id and .object == "response.deleted" and .deleted == true' >/dev/null
+  curl -fsS -X DELETE "$URL/v1/conversations/$CONV_ID" \
+    | jq -e --arg id "$CONV_ID" '.id == $id and .deleted == true' >/dev/null
+done
+```
+
+### S162 Usage summary exposes rewrite savings fields
+
+The usage summary carries the rewrite-savings aggregates on every storage
+backend; without a registered request rewriter the token counter is zero.
+
+```bash
+for URL in "$BASE_URL" "$PG_BASE_URL" "$MONGO_BASE_URL"; do
+  curl -fsS "$URL/admin/usage/summary" \
+    | jq -e '
+        has("rewrite_tokens_saved")
+        and (.rewrite_tokens_saved | type == "number")
+        and (.rewrite_tokens_saved >= 0)
+        and has("rewrite_cost_saved")
+      ' >/dev/null
+done
+```
+
+## 23. MCP gateway and provider request health
+
+These scenarios cover the post-v0.1.51 features: the aggregating MCP gateway
+(PR #502), JSON-RPC body capture on MCP audit entries (PR #534), and
+real-traffic `request_health` on provider status (PR #521). They need the mock
+MCP upstream on port 18090 (started by `manage-release-e2e-stack.sh`).
+
+### S163 Admin MCP server CRUD with secret redaction and catalog inspector
+
+Registers the token-gated alpha and open beta upstreams, checks the admin
+view (headers redacted as `***`, connection state, tool counts), reads the
+per-server catalog, and deletes both.
+
+```bash
+if ! curl -fsS "$MCP_UPSTREAM_BASE/healthz" >/dev/null 2>&1; then
+  echo "SKIPPED: mock MCP upstream is not running on $MCP_UPSTREAM_BASE"
+  exit 0
+fi
+
+mcp_register_release_servers "$BASE_URL"
+
+LIST_FILE="$QA_RUN_DIR/s163.list.json"
+curl -fsS "$BASE_URL/admin/mcp-servers" > "$LIST_FILE"
+jq -e --arg a "$QA_MCP_ALPHA" --arg b "$QA_MCP_BETA" '
+  any(.[]; .name == $a and .managed == false and .transport == "http" and .status == "connected"
+      and .tool_count == 2 and .prompt_count == 1 and .resource_count == 1
+      and .headers["X-Mock-Token"] == "***")
+  and any(.[]; .name == $b and .managed == false and .status == "connected" and .tool_count == 2)
+' "$LIST_FILE" >/dev/null
+
+CATALOG_FILE="$QA_RUN_DIR/s163.catalog.json"
+curl -fsS "$BASE_URL/admin/mcp-servers/$QA_MCP_ALPHA_SLUG/catalog" > "$CATALOG_FILE"
+jq '.' "$CATALOG_FILE" | head -40
+jq -e '
+  ([.tools[]?.name] | sort == ["add","echo"])
+  and any(.prompts[]?; .name == "greeting")
+  and any(.resources[]?; .uri == "mock://alpha/info")
+' "$CATALOG_FILE" >/dev/null
+
+mcp_cleanup_release_servers "$BASE_URL"
+curl -fsS "$BASE_URL/admin/mcp-servers" \
+  | jq -e --arg a "$QA_MCP_ALPHA" --arg b "$QA_MCP_BETA" 'all(.[]?; .name != $a and .name != $b)' >/dev/null
+```
+
+### S164 Aggregated /mcp initialize with merged instructions and namespaced tools
+
+Runs the streamable-HTTP handshake against `/mcp` with plain curl and checks
+that upstream instructions are merged into the gateway `initialize` result and
+that `tools/list` exposes deterministic `{server}_{tool}` names.
+
+```bash
+if ! curl -fsS "$MCP_UPSTREAM_BASE/healthz" >/dev/null 2>&1; then
+  echo "SKIPPED: mock MCP upstream is not running on $MCP_UPSTREAM_BASE"
+  exit 0
+fi
+
+mcp_register_release_servers "$BASE_URL"
+trap 'mcp_cleanup_release_servers "$BASE_URL"' EXIT
+
+HEADERS_FILE="$QA_RUN_DIR/s164.init.headers"
+INIT_FILE="$QA_RUN_DIR/s164.init.raw"
+SID=$(mcp_initialize "$BASE_URL/mcp" "$HEADERS_FILE" "$INIT_FILE")
+[ -n "$SID" ]
+sed -n -e 's/^data: //p' -e t -e '/^{/p' "$INIT_FILE" | jq -e '
+  .result.protocolVersion != null
+  and (.result.serverInfo.name | type == "string")
+  and (.result.instructions | contains("MOCKMCP_ALPHA_INSTRUCTIONS"))
+' >/dev/null
+mcp_initialized "$BASE_URL/mcp" "$SID"
+
+TOOLS_FILE="$QA_RUN_DIR/s164.tools.json"
+mcp_post "$BASE_URL/mcp" "$SID" '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' > "$TOOLS_FILE"
+jq -c '.result.tools | map(.name)' "$TOOLS_FILE"
+jq -e --arg a "$QA_MCP_ALPHA_SLUG" --arg b "$QA_MCP_BETA_SLUG" '
+  (.result.tools | map(.name)) as $names
+  | ($names | index($a + "_add") != null)
+    and ($names | index($a + "_echo") != null)
+    and ($names | index($b + "_fetch") != null)
+    and ($names | index($b + "_search") != null)
+    and ($names == ($names | sort))
+' "$TOOLS_FILE" >/dev/null
+```
+
+### S165 tools/call by namespaced and bare name plus MCP usage entries
+
+Calls one tool through the aggregated endpoint using its namespaced name and
+another using its unique bare name, then checks the usage entry written for
+the call (`provider="mcp"`, `provider_name`=server, `model`=namespaced tool).
+
+```bash
+if ! curl -fsS "$MCP_UPSTREAM_BASE/healthz" >/dev/null 2>&1; then
+  echo "SKIPPED: mock MCP upstream is not running on $MCP_UPSTREAM_BASE"
+  exit 0
+fi
+
+mcp_register_release_servers "$BASE_URL"
+trap 'mcp_cleanup_release_servers "$BASE_URL"' EXIT
+
+# Session binding pins the session to its initializing principal, so the
+# user-path header must be identical on every request of the session.
+MCP_QA_PATH="/team/mcp/e2e/$QA_SUFFIX"
+HEADERS_FILE="$QA_RUN_DIR/s165.init.headers"
+INIT_FILE="$QA_RUN_DIR/s165.init.raw"
+SID=$(mcp_initialize "$BASE_URL/mcp" "$HEADERS_FILE" "$INIT_FILE" -H "X-GoModel-User-Path: $MCP_QA_PATH")
+mcp_initialized "$BASE_URL/mcp" "$SID" -H "X-GoModel-User-Path: $MCP_QA_PATH"
+
+REQ_ID="qa-mcp-call-$QA_SUFFIX"
+CALL_FILE="$QA_RUN_DIR/s165.call.json"
+mcp_post "$BASE_URL/mcp" "$SID" \
+  "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"${QA_MCP_ALPHA_SLUG}_echo\",\"arguments\":{\"marker\":\"QA_MCP_NAMESPACED_OK\"}}}" \
+  -H "X-Request-ID: $REQ_ID" \
+  -H "X-GoModel-User-Path: $MCP_QA_PATH" \
+  > "$CALL_FILE"
+jq '.' "$CALL_FILE"
+jq -e '
+  (.result.isError // false) == false
+  and any(.result.content[]?; .type == "text" and (.text | contains("echo:") and contains("QA_MCP_NAMESPACED_OK")))
+' "$CALL_FILE" >/dev/null
+
+# A unique bare tool name resolves to its single namespaced registration
+# (spec'd Postel fallback; was a KNOWN GAP until 2026-07-15). "search" exists
+# only on the beta server.
+BARE_FILE="$QA_RUN_DIR/s165.bare.json"
+mcp_post "$BASE_URL/mcp" "$SID" \
+  '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search","arguments":{"q":"qa-bare"}}}' \
+  -H "X-GoModel-User-Path: $MCP_QA_PATH" \
+  > "$BARE_FILE"
+jq -e '
+  (.result.isError // false) == false
+  and any(.result.content[]?; .type == "text" and (.text | contains("search:") and contains("qa-bare")))
+' "$BARE_FILE" >/dev/null
+
+# A name that matches nothing (namespaced or bare) still errors. Ambiguous
+# bare names (same tool on two servers) are covered by unit tests; the two
+# mock servers expose disjoint tool sets.
+mcp_post "$BASE_URL/mcp" "$SID" \
+  '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"qa-no-such-bare-tool","arguments":{}}}' \
+  -H "X-GoModel-User-Path: $MCP_QA_PATH" \
+  | jq -e '(.error != null) or (.result.isError == true)' >/dev/null
+
+USAGE_FILE="$QA_RUN_DIR/s165.usage.json"
+FOUND=0
+for _ in $(seq 1 15); do
+  curl -fsS "$BASE_URL/admin/usage/log?search=$REQ_ID&limit=5" > "$USAGE_FILE"
+  if jq -e --arg rid "$REQ_ID" --arg model "${QA_MCP_ALPHA_SLUG}_echo" --arg server "$QA_MCP_ALPHA_SLUG" --arg up "$MCP_QA_PATH" '
+    any(.entries[]?; .request_id == $rid and .provider == "mcp" and .provider_name == $server and .model == $model and .user_path == $up)
+  ' "$USAGE_FILE" >/dev/null; then
+    FOUND=1
+    break
+  fi
+  sleep 1
+done
+if [ "$FOUND" -ne 1 ]; then
+  jq '.' "$USAGE_FILE" >&2 || true
+  echo "error: MCP tools/call usage entry was not flushed for $REQ_ID" >&2
+  exit 1
+fi
+```
+
+### S166 Per-server endpoint original names and X-MCP-Servers narrowing
+
+The per-server endpoint `/mcp/{server}` exposes original tool names, and the
+`X-MCP-Servers` request header narrows an aggregated session to a subset.
+
+```bash
+if ! curl -fsS "$MCP_UPSTREAM_BASE/healthz" >/dev/null 2>&1; then
+  echo "SKIPPED: mock MCP upstream is not running on $MCP_UPSTREAM_BASE"
+  exit 0
+fi
+
+mcp_register_release_servers "$BASE_URL"
+trap 'mcp_cleanup_release_servers "$BASE_URL"' EXIT
+
+HEADERS_FILE="$QA_RUN_DIR/s166.init.headers"
+INIT_FILE="$QA_RUN_DIR/s166.init.raw"
+SID=$(mcp_initialize "$BASE_URL/mcp/$QA_MCP_BETA_SLUG" "$HEADERS_FILE" "$INIT_FILE")
+mcp_initialized "$BASE_URL/mcp/$QA_MCP_BETA_SLUG" "$SID"
+mcp_post "$BASE_URL/mcp/$QA_MCP_BETA_SLUG" "$SID" '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+  | jq -e '(.result.tools | map(.name) | sort) == ["fetch","search"]' >/dev/null
+
+NARROW_HEADERS="$QA_RUN_DIR/s166.narrow.headers"
+NARROW_INIT="$QA_RUN_DIR/s166.narrow.raw"
+NSID=$(mcp_initialize "$BASE_URL/mcp" "$NARROW_HEADERS" "$NARROW_INIT" -H "X-MCP-Servers: $QA_MCP_ALPHA_SLUG")
+mcp_initialized "$BASE_URL/mcp" "$NSID" -H "X-MCP-Servers: $QA_MCP_ALPHA_SLUG"
+mcp_post "$BASE_URL/mcp" "$NSID" '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+  -H "X-MCP-Servers: $QA_MCP_ALPHA_SLUG" \
+  | jq -e --arg a "$QA_MCP_ALPHA_SLUG" '
+      (.result.tools | map(.name) | sort) == [$a + "_add", $a + "_echo"]
+    ' >/dev/null
+```
+
+### S167 MCP audit entries carry JSON-RPC bodies and nosniff
+
+With `LOGGING_LOG_BODIES` on, an MCP `tools/call` audit entry is labelled with
+the tool name and `provider="mcp"`, and captures both the JSON-RPC request
+frame and the SSE-decoded response frame. The MCP response also carries
+`X-Content-Type-Options: nosniff`.
+
+```bash
+if ! curl -fsS "$MCP_UPSTREAM_BASE/healthz" >/dev/null 2>&1; then
+  echo "SKIPPED: mock MCP upstream is not running on $MCP_UPSTREAM_BASE"
+  exit 0
+fi
+
+mcp_register_release_servers "$BASE_URL"
+trap 'mcp_cleanup_release_servers "$BASE_URL"' EXIT
+
+HEADERS_FILE="$QA_RUN_DIR/s167.init.headers"
+INIT_FILE="$QA_RUN_DIR/s167.init.raw"
+SID=$(mcp_initialize "$BASE_URL/mcp" "$HEADERS_FILE" "$INIT_FILE")
+grep -Eiq '^x-content-type-options: *nosniff' "$HEADERS_FILE"
+mcp_initialized "$BASE_URL/mcp" "$SID"
+
+REQ_ID="qa-mcp-audit-$QA_SUFFIX"
+CALL_HEADERS="$QA_RUN_DIR/s167.call.headers"
+mcp_post "$BASE_URL/mcp" "$SID" \
+  "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"${QA_MCP_ALPHA_SLUG}_echo\",\"arguments\":{\"marker\":\"QA_MCP_AUDIT_BODY_OK\"}}}" \
+  -H "X-Request-ID: $REQ_ID" \
+  -D "$CALL_HEADERS" \
+  > "$QA_RUN_DIR/s167.call.json"
+grep -Eiq '^x-content-type-options: *nosniff' "$CALL_HEADERS"
+
+AUDIT_FILE="$QA_RUN_DIR/s167.audit.json"
+FOUND=0
+for _ in $(seq 1 15); do
+  curl -fsS "$BASE_URL/admin/audit/log?search=$REQ_ID&limit=5" > "$AUDIT_FILE"
+  if jq -e --arg rid "$REQ_ID" --arg tool "${QA_MCP_ALPHA_SLUG}_echo" '
+    any(.entries[]?;
+      .request_id == $rid
+      and .provider == "mcp"
+      and .requested_model == $tool
+      and .status_code == 200
+      and ((.data.request_body | tojson) | contains("QA_MCP_AUDIT_BODY_OK"))
+      and ((.data.response_body | tojson) | (contains("echo:") and contains("QA_MCP_AUDIT_BODY_OK"))))
+  ' "$AUDIT_FILE" >/dev/null; then
+    FOUND=1
+    break
+  fi
+  sleep 1
+done
+if [ "$FOUND" -ne 1 ]; then
+  jq '.' "$AUDIT_FILE" >&2 || true
+  echo "error: MCP audit entry with bodies was not flushed for $REQ_ID" >&2
+  exit 1
+fi
+```
+
+### S168 MCP negatives: unknown server, unknown tool, session identity binding, header-principal enforcement, stdio rejected
+
+Unknown per-server endpoints 404, an unknown tool returns a JSON-RPC error,
+a session initialized by one user path is invisible to another principal,
+header-identified MCP posts are gated by user-path rate limits, `user_paths`
+server scoping admits subtree members and hides the server from outsiders,
+and the admin API rejects runtime-registered stdio servers.
+
+```bash
+if ! curl -fsS "$MCP_UPSTREAM_BASE/healthz" >/dev/null 2>&1; then
+  echo "SKIPPED: mock MCP upstream is not running on $MCP_UPSTREAM_BASE"
+  exit 0
+fi
+
+mcp_register_release_servers "$BASE_URL"
+trap 'mcp_cleanup_release_servers "$BASE_URL"' EXIT
+
+curl -sS -o /dev/null -w '%{http_code}' "$BASE_URL/mcp/qa-no-such-server-$QA_BUDGET_SUFFIX" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"qa","version":"1"}}}' \
+  | grep -q '^404$'
+
+HEADERS_FILE="$QA_RUN_DIR/s168.init.headers"
+INIT_FILE="$QA_RUN_DIR/s168.init.raw"
+SID=$(mcp_initialize "$BASE_URL/mcp" "$HEADERS_FILE" "$INIT_FILE" -H "X-GoModel-User-Path: /team/mcp/owner/$QA_SUFFIX")
+mcp_initialized "$BASE_URL/mcp" "$SID" -H "X-GoModel-User-Path: /team/mcp/owner/$QA_SUFFIX"
+
+mcp_post "$BASE_URL/mcp" "$SID" \
+  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"qa_totally_unknown_tool","arguments":{}}}' \
+  -H "X-GoModel-User-Path: /team/mcp/owner/$QA_SUFFIX" \
+  | jq -e '(.error != null) or (.result.isError == true)' >/dev/null
+
+# Session-to-principal binding sees header-based user paths (was a KNOWN BUG
+# until 2026-07-15: /mcp was not stamped with the user-path header, so header
+# principals could ride a leaked session ID). A different header principal —
+# or no header at all — presenting the owner's session ID gets 404.
+curl -sS -o "$QA_RUN_DIR/s168.stolen.body" -w '%{http_code}' "$BASE_URL/mcp" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2025-06-18' \
+  -H "Mcp-Session-Id: $SID" \
+  -H "X-GoModel-User-Path: /team/mcp/intruder/$QA_SUFFIX" \
+  -d '{"jsonrpc":"2.0","id":4,"method":"tools/list"}' \
+  | grep -q '^404$'
+curl -sS -o /dev/null -w '%{http_code}' "$BASE_URL/mcp" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2025-06-18' \
+  -H "Mcp-Session-Id: $SID" \
+  -d '{"jsonrpc":"2.0","id":4,"method":"tools/list"}' \
+  | grep -q '^404$'
+# The owner keeps working under the original header.
+mcp_post "$BASE_URL/mcp" "$SID" '{"jsonrpc":"2.0","id":5,"method":"tools/list"}' \
+  -H "X-GoModel-User-Path: /team/mcp/owner/$QA_SUFFIX" \
+  | jq -e '.result.tools | length > 0' >/dev/null
+
+# Cross-endpoint session reuse IS rejected: a session initialized on one
+# pinned endpoint cannot be presented on another.
+PIN_HEADERS="$QA_RUN_DIR/s168.pin.headers"
+PIN_INIT="$QA_RUN_DIR/s168.pin.raw"
+PSID=$(mcp_initialize "$BASE_URL/mcp/$QA_MCP_ALPHA_SLUG" "$PIN_HEADERS" "$PIN_INIT")
+curl -sS -o /dev/null -w '%{http_code}' "$BASE_URL/mcp/$QA_MCP_BETA_SLUG" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2025-06-18' \
+  -H "Mcp-Session-Id: $PSID" \
+  -d '{"jsonrpc":"2.0","id":5,"method":"tools/list"}' \
+  | grep -q '^404$'
+
+curl -sS -o "$QA_RUN_DIR/s168.stdio.body" -w '%{http_code}' -X PUT "$BASE_URL/admin/mcp-servers" \
+  -H 'Content-Type: application/json' \
+  -d "{\"name\":\"qa-stdio-$QA_BUDGET_SUFFIX\",\"transport\":\"stdio\",\"url\":\"\",\"command\":\"/bin/echo\"}" \
+  | grep -q '^400$'
+
+# User-path rate limits gate header-identified MCP posts (was a KNOWN BUG
+# until 2026-07-15: admission resolved the path to "/" because the header was
+# never stamped into the context). Sessionless posts keep the accounting
+# simple: one rule request per POST, no handshake traffic on the counter.
+RL_PATH="/qa/mcp-admission/$QA_SUFFIX"
+trap 'mcp_cleanup_release_servers "$BASE_URL"; curl -sS -o /dev/null -X DELETE "$BASE_URL/admin/rate-limits" -H "Content-Type: application/json" -d "{\"user_path\":\"$RL_PATH\",\"limit_key\":{\"period\":\"minute\"}}" || true' EXIT
+curl -fsS -X PUT "$BASE_URL/admin/rate-limits" \
+  -H 'Content-Type: application/json' \
+  -d "{\"user_path\":\"$RL_PATH\",\"limit_key\":{\"period\":\"minute\"},\"max_requests\":1}" >/dev/null
+curl -sS -o /dev/null -w '%{http_code}' "$BASE_URL/mcp" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H "X-GoModel-User-Path: $RL_PATH/leaf" \
+  -d '{"jsonrpc":"2.0","id":10,"method":"tools/list"}' \
+  | grep -q '^200$'
+RL_BODY="$QA_RUN_DIR/s168.rl.body"
+RL_HEADERS="$QA_RUN_DIR/s168.rl.headers"
+curl -sS -D "$RL_HEADERS" -o "$RL_BODY" -w '%{http_code}' "$BASE_URL/mcp" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H "X-GoModel-User-Path: $RL_PATH/leaf" \
+  -d '{"jsonrpc":"2.0","id":11,"method":"tools/list"}' \
+  | grep -q '^429$'
+grep -Eiq '^Retry-After: *[0-9]+' "$RL_HEADERS"
+jq -e '.error.code == "rate_limit_exceeded"' "$RL_BODY" >/dev/null
+
+# user_paths server scoping admits subtree members and hides the server from
+# everyone else (was fail-closed-for-all until 2026-07-15). Re-scoping alpha
+# is the last mutation in this scenario; cleanup deletes the row anyway.
+SECRET_PATH="/team/mcp/secret/$QA_SUFFIX"
+curl -fsS -X PUT "$BASE_URL/admin/mcp-servers" \
+  -H 'Content-Type: application/json' \
+  -d "{\"name\":\"$QA_MCP_ALPHA\",\"url\":\"$MCP_UPSTREAM_BASE/alpha\",\"transport\":\"http\",\"headers\":{\"X-Mock-Token\":\"$MCP_UPSTREAM_TOKEN\"},\"user_paths\":[\"$SECRET_PATH\"],\"description\":\"qa release alpha scoped\"}" >/dev/null
+mcp_wait_status "$BASE_URL" "$QA_MCP_ALPHA" connected
+
+MEMBER_HEADERS="$QA_RUN_DIR/s168.member.headers"
+MEMBER_INIT="$QA_RUN_DIR/s168.member.raw"
+MSID=$(mcp_initialize "$BASE_URL/mcp" "$MEMBER_HEADERS" "$MEMBER_INIT" -H "X-GoModel-User-Path: $SECRET_PATH/dev")
+mcp_initialized "$BASE_URL/mcp" "$MSID" -H "X-GoModel-User-Path: $SECRET_PATH/dev"
+mcp_post "$BASE_URL/mcp" "$MSID" '{"jsonrpc":"2.0","id":12,"method":"tools/list"}' \
+  -H "X-GoModel-User-Path: $SECRET_PATH/dev" \
+  | jq -e --arg a "$QA_MCP_ALPHA_SLUG" 'any(.result.tools[]?; .name == $a + "_echo")' >/dev/null
+
+OUTSIDER_HEADERS="$QA_RUN_DIR/s168.outsider.headers"
+OUTSIDER_INIT="$QA_RUN_DIR/s168.outsider.raw"
+OSID=$(mcp_initialize "$BASE_URL/mcp" "$OUTSIDER_HEADERS" "$OUTSIDER_INIT" -H "X-GoModel-User-Path: /team/mcp/outsider/$QA_SUFFIX")
+mcp_initialized "$BASE_URL/mcp" "$OSID" -H "X-GoModel-User-Path: /team/mcp/outsider/$QA_SUFFIX"
+mcp_post "$BASE_URL/mcp" "$OSID" '{"jsonrpc":"2.0","id":13,"method":"tools/list"}' \
+  -H "X-GoModel-User-Path: /team/mcp/outsider/$QA_SUFFIX" \
+  | jq -e --arg a "$QA_MCP_ALPHA_SLUG" '
+      all(.result.tools[]?; (.name | startswith($a + "_")) | not)
+      and (.result.tools | length > 0)
+    ' >/dev/null
+
+# The pinned endpoint honors the same scoping: outsiders get 404.
+curl -sS -o /dev/null -w '%{http_code}' "$BASE_URL/mcp/$QA_MCP_ALPHA_SLUG" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H "X-GoModel-User-Path: /team/mcp/outsider/$QA_SUFFIX" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"qa","version":"1"}}}' \
+  | grep -q '^404$'
+```
+
+### S169 Secret *** round-trip preserves the stored header; a wrong secret breaks the dial
+
+Re-upserting the token-gated server with the redaction placeholder must keep
+the stored `X-Mock-Token`, so the reconnect still succeeds; upserting a wrong
+token must leave the server unable to connect.
+
+```bash
+if ! curl -fsS "$MCP_UPSTREAM_BASE/healthz" >/dev/null 2>&1; then
+  echo "SKIPPED: mock MCP upstream is not running on $MCP_UPSTREAM_BASE"
+  exit 0
+fi
+
+mcp_register_release_servers "$BASE_URL"
+trap 'mcp_cleanup_release_servers "$BASE_URL"' EXIT
+
+curl -fsS -X PUT "$BASE_URL/admin/mcp-servers" \
+  -H 'Content-Type: application/json' \
+  -d "{\"name\":\"$QA_MCP_ALPHA\",\"url\":\"$MCP_UPSTREAM_BASE/alpha\",\"transport\":\"http\",\"headers\":{\"X-Mock-Token\":\"***\"},\"description\":\"qa release alpha updated\"}" \
+  | jq -e '.headers["X-Mock-Token"] == "***" and .description == "qa release alpha updated"' >/dev/null
+curl -fsS -X POST "$BASE_URL/admin/mcp-servers/$QA_MCP_ALPHA_SLUG/reconnect" >/dev/null
+mcp_wait_status "$BASE_URL" "$QA_MCP_ALPHA" connected
+
+HEADERS_FILE="$QA_RUN_DIR/s169.init.headers"
+INIT_FILE="$QA_RUN_DIR/s169.init.raw"
+SID=$(mcp_initialize "$BASE_URL/mcp/$QA_MCP_ALPHA_SLUG" "$HEADERS_FILE" "$INIT_FILE")
+mcp_initialized "$BASE_URL/mcp/$QA_MCP_ALPHA_SLUG" "$SID"
+mcp_post "$BASE_URL/mcp/$QA_MCP_ALPHA_SLUG" "$SID" \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"marker":"QA_MCP_SECRET_KEPT"}}}' \
+  | jq -e 'any(.result.content[]?; .text | contains("QA_MCP_SECRET_KEPT"))' >/dev/null
+
+curl -fsS -X PUT "$BASE_URL/admin/mcp-servers" \
+  -H 'Content-Type: application/json' \
+  -d "{\"name\":\"$QA_MCP_ALPHA\",\"url\":\"$MCP_UPSTREAM_BASE/alpha\",\"transport\":\"http\",\"headers\":{\"X-Mock-Token\":\"definitely-wrong\"}}" \
+  > "$QA_RUN_DIR/s169.wrong.json" || true
+
+BROKEN=0
+for _ in $(seq 1 20); do
+  curl -fsS -X POST "$BASE_URL/admin/mcp-servers/$QA_MCP_ALPHA_SLUG/reconnect" > "$QA_RUN_DIR/s169.reconnect.json" || true
+  if curl -fsS "$BASE_URL/admin/mcp-servers" \
+    | jq -e --arg n "$QA_MCP_ALPHA" 'any(.[]?; .name == $n and .status != "connected")' >/dev/null; then
+    BROKEN=1
+    break
+  fi
+  sleep 1
+done
+if [ "$BROKEN" -ne 1 ]; then
+  curl -fsS "$BASE_URL/admin/mcp-servers" | jq . >&2 || true
+  echo "error: alpha stayed connected despite a wrong upstream token" >&2
+  exit 1
+fi
+```
+
+### S170 Provider request health folded into /admin/providers/status
+
+After real chat traffic the provider status carries `request_health`: a
+10-minute window of per-model request counts plus the circuit-breaker state.
+
+```bash
+RESP_FILE="$QA_RUN_DIR/s170.chat.json"
+curl -fsS "$BASE_URL/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -H "X-Request-ID: qa-health-$QA_SUFFIX" \
+  -d '{"model":"gpt-4.1-nano","messages":[{"role":"user","content":"Reply with exactly QA_HEALTH_OK"}],"max_tokens":20}' \
+  > "$RESP_FILE"
+assert_chat_response_contains "$RESP_FILE" "openai" "QA_HEALTH_OK"
+
+STATUS_FILE="$QA_RUN_DIR/s170.status.json"
+FOUND=0
+for _ in $(seq 1 15); do
+  curl -fsS "$BASE_URL/admin/providers/status" > "$STATUS_FILE"
+  if jq -e '
+    any(.providers[]?;
+      .name == "openai"
+      and .request_health != null
+      and .request_health.window_seconds == 600
+      and .request_health.requests >= 1
+      and ((.request_health.circuit_state // "closed") == "closed")
+      and any(.request_health.models[]?; (.model | startswith("gpt-4.1-nano")) and .requests >= 1))
+  ' "$STATUS_FILE" >/dev/null; then
+    FOUND=1
+    break
+  fi
+  sleep 1
+done
+if [ "$FOUND" -ne 1 ]; then
+  jq '{summary, openai: [.providers[]? | select(.name == "openai") | {status, request_health}]}' "$STATUS_FILE" >&2 || true
+  echo "error: openai request_health did not reflect the seeded request" >&2
+  exit 1
+fi
+jq -e 'all(.providers[]?; .status_reason | type == "string" and length > 0)' "$STATUS_FILE" >/dev/null
+```
+
+### S171 MCP server store parity on PostgreSQL and MongoDB
+
+The `mcp_servers` admin store round-trips on both non-SQLite backends, and a
+registered server serves tool calls through each gateway.
+
+```bash
+if ! curl -fsS "$MCP_UPSTREAM_BASE/healthz" >/dev/null 2>&1; then
+  echo "SKIPPED: mock MCP upstream is not running on $MCP_UPSTREAM_BASE"
+  exit 0
+fi
+
+for URL in "$PG_BASE_URL" "$MONGO_BASE_URL"; do
+  curl -fsS -X PUT "$URL/admin/mcp-servers" \
+    -H 'Content-Type: application/json' \
+    -d "{\"name\":\"$QA_MCP_BETA\",\"url\":\"$MCP_UPSTREAM_BASE/beta\",\"transport\":\"http\"}" \
+    | jq -e --arg n "$QA_MCP_BETA" '.name == $n and .managed == false' >/dev/null
+  mcp_wait_status "$URL" "$QA_MCP_BETA" connected
+
+  HEADERS_FILE="$QA_RUN_DIR/s171.init.headers"
+  INIT_FILE="$QA_RUN_DIR/s171.init.raw"
+  SID=$(mcp_initialize "$URL/mcp" "$HEADERS_FILE" "$INIT_FILE")
+  mcp_initialized "$URL/mcp" "$SID"
+  mcp_post "$URL/mcp" "$SID" \
+    "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"${QA_MCP_BETA}_fetch\",\"arguments\":{\"u\":\"qa-parity\"}}}" \
+    | jq -e 'any(.result.content[]?; .text | contains("fetch:") and contains("qa-parity"))' >/dev/null
+
+  curl -fsS -X DELETE "$URL/admin/mcp-servers/$QA_MCP_BETA" >/dev/null
+  curl -fsS "$URL/admin/mcp-servers" \
+    | jq -e --arg n "$QA_MCP_BETA" 'all(.[]?; .name != $n)' >/dev/null
+done
+```
+
+### S172 Namespaced prompts and resources relay through /mcp
+
+Prompts are namespaced like tools; resources and resource templates relay
+verbatim, and `resources/read` returns the upstream payload.
+
+```bash
+if ! curl -fsS "$MCP_UPSTREAM_BASE/healthz" >/dev/null 2>&1; then
+  echo "SKIPPED: mock MCP upstream is not running on $MCP_UPSTREAM_BASE"
+  exit 0
+fi
+
+mcp_register_release_servers "$BASE_URL"
+trap 'mcp_cleanup_release_servers "$BASE_URL"' EXIT
+
+HEADERS_FILE="$QA_RUN_DIR/s172.init.headers"
+INIT_FILE="$QA_RUN_DIR/s172.init.raw"
+SID=$(mcp_initialize "$BASE_URL/mcp" "$HEADERS_FILE" "$INIT_FILE")
+mcp_initialized "$BASE_URL/mcp" "$SID"
+
+mcp_post "$BASE_URL/mcp" "$SID" '{"jsonrpc":"2.0","id":2,"method":"prompts/list"}' \
+  | jq -e --arg a "$QA_MCP_ALPHA_SLUG" 'any(.result.prompts[]?; .name == $a + "_greeting")' >/dev/null
+
+mcp_post "$BASE_URL/mcp" "$SID" \
+  "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"prompts/get\",\"params\":{\"name\":\"${QA_MCP_ALPHA_SLUG}_greeting\"}}" \
+  | jq -e 'any(.result.messages[]?; .content.text == "MOCKMCP_GREETING_OK")' >/dev/null
+
+mcp_post "$BASE_URL/mcp" "$SID" '{"jsonrpc":"2.0","id":4,"method":"resources/list"}' \
+  | jq -e 'any(.result.resources[]?; .uri == "mock://alpha/info")' >/dev/null
+
+mcp_post "$BASE_URL/mcp" "$SID" \
+  '{"jsonrpc":"2.0","id":5,"method":"resources/read","params":{"uri":"mock://alpha/info"}}' \
+  | jq -e 'any(.result.contents[]?; .text == "MOCKMCP_ALPHA_RESOURCE_OK")' >/dev/null
+```
+
+## 24. Anthropic Messages drop-in compatibility
+
+These scenarios cover the gaps closed by the Anthropic-SDK drop-in fix pass:
+`x-api-key` auth fallback, `stop_sequence` surfaced as a typed field, seeded
+`message_start` usage on streams, dialect-aware `/v1/models`, and a canonical
+404 envelope that no longer swallows 405s. `S173`-`S175` run on the
+auth-enabled gateway (`$AUTH_BASE_URL`) since the auth fallback needs a
+gateway with a master key configured; the rest run on `$BASE_URL`, which runs
+in unsafe mode. All are read-mostly and rerunnable in any order.
+
+### S173 `x-api-key` header authenticates like `Authorization: Bearer`
+
+Checks the Anthropic-native credential header works unchanged, matching
+`Anthropic(api_key=...)` SDK defaults.
+
+```bash
+RESP_FILE="$QA_RUN_DIR/s173.chat.json"
+curl -fsS "$AUTH_BASE_URL/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -H "x-api-key: $GOMODEL_MASTER_KEY" \
+  -d '{"model":"gpt-4.1-nano","messages":[{"role":"user","content":"Reply with exactly QA_XAPIKEY_OK"}],"max_tokens":20}' \
+  > "$RESP_FILE"
+assert_chat_response_contains "$RESP_FILE" "openai" "QA_XAPIKEY_OK"
+```
+
+### S174 Missing credentials names both accepted schemes (negative)
+
+Checks the combined error message added when neither header is present.
+
+```bash
+HEADERS_FILE="$QA_RUN_DIR/s174.headers"
+BODY_FILE="$QA_RUN_DIR/s174.body"
+curl -sS -D "$HEADERS_FILE" -o "$BODY_FILE" "$AUTH_BASE_URL/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-4.1-nano","messages":[{"role":"user","content":"hi"}]}'
+grep -Eiq '^HTTP/.* 401 ' "$HEADERS_FILE"
+jq -e '.error.type == "authentication_error" and (.error.message | test("Authorization: Bearer") and test("x-api-key"))' "$BODY_FILE" >/dev/null
+```
+
+### S175 `Authorization` takes precedence over `x-api-key` when both are sent
+
+A wrong bearer token is still rejected even when a valid `x-api-key` is also
+present, confirming the fallback only applies when `Authorization` is absent.
+
+```bash
+HEADERS_FILE="$QA_RUN_DIR/s175.headers"
+BODY_FILE="$QA_RUN_DIR/s175.body"
+curl -sS -D "$HEADERS_FILE" -o "$BODY_FILE" "$AUTH_BASE_URL/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer totally-wrong-key' \
+  -H "x-api-key: $GOMODEL_MASTER_KEY" \
+  -d '{"model":"gpt-4.1-nano","messages":[{"role":"user","content":"hi"}]}'
+grep -Eiq '^HTTP/.* 401 ' "$HEADERS_FILE"
+```
+
+### S176 `stop_sequence` surfaces as a typed field (non-streaming, Anthropic backend)
+
+Checks the natively reported matched sequence round-trips through
+`/v1/messages` as `stop_reason: "stop_sequence"` plus `stop_sequence`.
+
+```bash
+RESP_FILE="$QA_RUN_DIR/s176.messages.json"
+curl -fsS "$BASE_URL/v1/messages" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"claude-sonnet-4-6","max_tokens":64,"stop_sequences":["QA_STOP_HERE"],"messages":[{"role":"user","content":"Count from 1 to 10, one number per line. After the number 3 write the exact text QA_STOP_HERE then continue."}]}' \
+  > "$RESP_FILE"
+jq '{stop_reason,stop_sequence}' "$RESP_FILE"
+jq -e '.stop_reason == "stop_sequence" and .stop_sequence == "QA_STOP_HERE"' "$RESP_FILE" >/dev/null
+```
+
+### S177 `stop_sequence` in streaming `message_delta` plus seeded `message_start` usage
+
+Checks the streaming counterpart of `S176` and that `message_start` no longer
+reports a hardcoded zero for `usage.input_tokens`.
+
+```bash
+SSE_FILE="$QA_RUN_DIR/s177.messages.sse"
+curl -fsS --no-buffer "$BASE_URL/v1/messages" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"claude-sonnet-4-6","max_tokens":64,"stream":true,"stop_sequences":["QA_STOP_HERE"],"messages":[{"role":"user","content":"Count from 1 to 10, one number per line. After the number 3 write the exact text QA_STOP_HERE then continue."}]}' \
+  > "$SSE_FILE"
+grep -A1 '^event: message_start' "$SSE_FILE" | sed -n '2p' | sed 's/^data: //' \
+  | jq -e '.message.usage.input_tokens > 0' >/dev/null
+grep -A1 '^event: message_delta' "$SSE_FILE" | sed -n '2p' | sed 's/^data: //' \
+  | jq -e '.delta.stop_reason == "stop_sequence" and .delta.stop_sequence == "QA_STOP_HERE"' >/dev/null
+```
+
+### S178 OpenAI-family backend keeps `end_turn` through `/v1/messages` (documented limitation)
+
+`finish_reason: "stop"` conflates a natural stop with a stop-sequence hit, so
+OpenAI-family providers structurally cannot report `stop_sequence`; checks the
+gateway keeps `end_turn` rather than fabricating a value.
+
+```bash
+RESP_FILE="$QA_RUN_DIR/s178.messages.json"
+curl -fsS "$BASE_URL/v1/messages" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-4.1-nano","max_tokens":64,"stop_sequences":["QA_STOP_HERE"],"messages":[{"role":"user","content":"Count from 1 to 10, one number per line. After the number 3 write the exact text QA_STOP_HERE then continue."}]}' \
+  > "$RESP_FILE"
+jq '{stop_reason,stop_sequence}' "$RESP_FILE"
+jq -e '.stop_reason == "end_turn" and .stop_sequence == null' "$RESP_FILE" >/dev/null
+```
+
+### S179 `GET /v1/models` renders the Anthropic shape for Anthropic SDK clients
+
+The Anthropic SDK always sends `anthropic-version`; checks the response takes
+the Anthropic list shape (`type`, `display_name`, `created_at`,
+`has_more`/`first_id`/`last_id`) instead of the OpenAI shape.
+
+```bash
+RESP_FILE="$QA_RUN_DIR/s179.models.json"
+curl -fsS "$BASE_URL/v1/models" -H 'anthropic-version: 2023-06-01' > "$RESP_FILE"
+jq '{sample: .data[0], has_more, first_id, last_id}' "$RESP_FILE"
+jq -e '
+    (.data | length) > 0
+    and .data[0].type == "model"
+    and (.data[0].display_name | type == "string")
+    and (.data[0] | has("object") | not)
+    and .has_more == false
+    and (.first_id != null)
+    and (.last_id != null)
+  ' "$RESP_FILE" >/dev/null
+```
+
+### S180 `GET /v1/models` stays OpenAI-shaped without the header (regression)
+
+Checks the default OpenAI-compatible listing shape is unchanged for callers
+that do not send `anthropic-version`.
+
+```bash
+RESP_FILE="$QA_RUN_DIR/s180.models.json"
+curl -fsS "$BASE_URL/v1/models" > "$RESP_FILE"
+jq -e '.object == "list" and (.data[0].object == "model")' "$RESP_FILE" >/dev/null
+```
+
+### S181 Unknown route 404 renders in the caller's wire dialect
+
+Checks the canonical 404 envelope added for unclassified routes: Anthropic
+shape when `anthropic-version` is present, gateway/OpenAI shape otherwise.
+
+```bash
+ANTHROPIC_BODY="$QA_RUN_DIR/s181.anthropic.json"
+DEFAULT_BODY="$QA_RUN_DIR/s181.default.json"
+curl -sS -o "$ANTHROPIC_BODY" -w '%{http_code}\n' "$BASE_URL/v1/does-not-exist" -H 'anthropic-version: 2023-06-01'
+curl -sS -o "$DEFAULT_BODY" -w '%{http_code}\n' "$BASE_URL/v1/does-not-exist"
+jq '.' "$ANTHROPIC_BODY"
+jq '.' "$DEFAULT_BODY"
+jq -e '.type == "error" and .error.type == "not_found_error"' "$ANTHROPIC_BODY" >/dev/null
+jq -e '(.type != "error") and .error.type == "not_found_error"' "$DEFAULT_BODY" >/dev/null
+```
+
+### S182 Known route with the wrong method still returns 405 (regression)
+
+The dialect-aware 404 handler is registered as the router-level
+`NotFoundHandler`, not a wildcard route, specifically so it does not shadow
+echo's 405 method-not-allowed handling for routes that do exist.
+
+```bash
+HEADERS_FILE="$QA_RUN_DIR/s182.headers"
+curl -sS -D "$HEADERS_FILE" -o /dev/null -X GET "$BASE_URL/v1/chat/completions"
+grep -Eiq '^HTTP/.* 405 ' "$HEADERS_FILE"
+```
+
+## 25. Anthropic Message Batches API
+
+These scenarios exercise `/v1/messages/batches*`, the Anthropic-dialect ingress
+over the same native-batch pipeline that serves `/v1/batches`. A batch's
+requests are translated per-item to canonical chat requests, so a Message
+Batch can route to any provider with native batch support, not only
+Anthropic. Batch IDs are pure prefix aliases of one underlying resource:
+`msgbatch_<uuid>` on this dialect, `batch_<uuid>` on `/v1/batches`. Real
+provider batches can take a long time to complete, so these scenarios check
+create/get/list/cancel/delete-guard/validation behavior rather than waiting
+for a batch to end; `S183`-`S191` are self-contained and rerunnable in any
+order but leave `in_progress`/`canceling` batches behind, like `S47`-`S48`.
+
+### S183 Create a native Anthropic Message Batch
+
+```bash
+RESP_FILE="$QA_RUN_DIR/s183.batch.json"
+curl -fsS "$BASE_URL/v1/messages/batches" \
+  -H 'Content-Type: application/json' \
+  -d '{"requests":[{"custom_id":"qa-msgbatch-anthropic-1","params":{"model":"claude-sonnet-4-6","max_tokens":32,"messages":[{"role":"user","content":"Reply with exactly QA_MSGBATCH_ANTHROPIC_OK"}]}}]}' \
+  > "$RESP_FILE"
+jq '{id,type,processing_status,request_counts}' "$RESP_FILE"
+jq -e '.type == "message_batch" and (.id | startswith("msgbatch_")) and (.processing_status | type == "string")' "$RESP_FILE" >/dev/null
+echo "$(jq -r .id "$RESP_FILE")" > "$QA_RUN_DIR/s183.batch-id"
+```
+
+### S184 Create a Message Batch routed to an OpenAI model (cross-provider)
+
+Checks the Anthropic Message Batches dialect is provider-agnostic like
+`/v1/messages`: an OpenAI model batch is created and materialized into an
+uploaded JSONL input file under the hood.
+
+```bash
+RESP_FILE="$QA_RUN_DIR/s184.batch.json"
+curl -fsS "$BASE_URL/v1/messages/batches" \
+  -H 'Content-Type: application/json' \
+  -d '{"requests":[{"custom_id":"qa-msgbatch-openai-1","params":{"model":"gpt-4.1-nano","max_tokens":32,"messages":[{"role":"user","content":"Reply with exactly QA_MSGBATCH_OPENAI_OK"}]}}]}' \
+  > "$RESP_FILE"
+jq '{id,type,processing_status}' "$RESP_FILE"
+jq -e '.type == "message_batch" and (.id | startswith("msgbatch_"))' "$RESP_FILE" >/dev/null
+echo "$(jq -r .id "$RESP_FILE")" > "$QA_RUN_DIR/s184.batch-id"
+```
+
+### S185 Get and list Message Batches
+
+```bash
+BATCH_ID=$(cat "$QA_RUN_DIR/s183.batch-id")
+GET_FILE="$QA_RUN_DIR/s185.get.json"
+LIST_FILE="$QA_RUN_DIR/s185.list.json"
+curl -fsS "$BASE_URL/v1/messages/batches/$BATCH_ID" > "$GET_FILE"
+jq -e --arg id "$BATCH_ID" '.id == $id and .type == "message_batch" and (.expires_at | type == "string")' "$GET_FILE" >/dev/null
+
+curl -fsS "$BASE_URL/v1/messages/batches?limit=20" > "$LIST_FILE"
+jq '{has_more,first_id,last_id,count:(.data|length)}' "$LIST_FILE"
+jq -e --arg id "$BATCH_ID" '[.data[].id] | index($id) != null' "$LIST_FILE" >/dev/null
+```
+
+### S186 Message Batch IDs are dialect aliases of `/v1/batches` resources
+
+Checks the `msgbatch_`/`batch_` prefix aliasing holds in both directions: a
+batch created on one dialect is retrievable on the other under the mapped ID.
+
+```bash
+BATCH_ID=$(cat "$QA_RUN_DIR/s183.batch-id")
+ALIASED_FILE="$QA_RUN_DIR/s186.aliased.json"
+curl -fsS "$BASE_URL/v1/batches/batch_${BATCH_ID#msgbatch_}" > "$ALIASED_FILE"
+jq -e --arg id "batch_${BATCH_ID#msgbatch_}" '.id == $id and .object == "batch" and .provider == "anthropic"' "$ALIASED_FILE" >/dev/null
+
+CREATE_FILE="$QA_RUN_DIR/s186.create.json"
+curl -fsS "$BASE_URL/v1/batches" \
+  -H 'Content-Type: application/json' \
+  -d '{"endpoint":"/v1/chat/completions","requests":[{"custom_id":"qa-reverse-alias-1","method":"POST","url":"/v1/chat/completions","body":{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"Reply with exactly QA_REVERSE_BATCH_OK"}],"max_tokens":32}}]}' \
+  > "$CREATE_FILE"
+NATIVE_ID=$(jq -er '.id' "$CREATE_FILE")
+REVERSE_FILE="$QA_RUN_DIR/s186.reverse.json"
+curl -fsS "$BASE_URL/v1/messages/batches/msgbatch_${NATIVE_ID#batch_}" > "$REVERSE_FILE"
+jq -e --arg id "msgbatch_${NATIVE_ID#batch_}" '.id == $id and .type == "message_batch"' "$REVERSE_FILE" >/dev/null
+```
+
+### S187 Cancel a Message Batch
+
+```bash
+BATCH_ID=$(cat "$QA_RUN_DIR/s184.batch-id")
+RESP_FILE="$QA_RUN_DIR/s187.cancel.json"
+curl -fsS -X POST "$BASE_URL/v1/messages/batches/$BATCH_ID/cancel" > "$RESP_FILE"
+jq '{id,processing_status,cancel_initiated_at}' "$RESP_FILE"
+jq -e --arg id "$BATCH_ID" '.id == $id and (.processing_status == "canceling" or .processing_status == "ended")' "$RESP_FILE" >/dev/null
+```
+
+### S188 Delete guard rejects a still-processing Message Batch (negative)
+
+Batches still processing must be canceled first, matching the Anthropic
+Message Batches contract.
+
+```bash
+BATCH_ID=$(cat "$QA_RUN_DIR/s183.batch-id")
+HEADERS_FILE="$QA_RUN_DIR/s188.headers"
+BODY_FILE="$QA_RUN_DIR/s188.body"
+curl -sS -D "$HEADERS_FILE" -o "$BODY_FILE" -X DELETE "$BASE_URL/v1/messages/batches/$BATCH_ID"
+cat "$BODY_FILE"
+grep -Eiq '^HTTP/.* 400 ' "$HEADERS_FILE"
+jq -e '.type == "error" and .error.type == "invalid_request_error" and (.error.message | test("still processing"))' "$BODY_FILE" >/dev/null
+```
+
+### S189 Message Batch create validation negatives
+
+```bash
+HEADERS_FILE="$QA_RUN_DIR/s189.headers"
+BODY_FILE="$QA_RUN_DIR/s189.body"
+
+curl -sS -D "$HEADERS_FILE" -o "$BODY_FILE" "$BASE_URL/v1/messages/batches" \
+  -H 'Content-Type: application/json' -d '{"requests":[]}'
+grep -Eiq '^HTTP/.* 400 ' "$HEADERS_FILE"
+
+curl -sS -D "$HEADERS_FILE" -o "$BODY_FILE" "$BASE_URL/v1/messages/batches" \
+  -H 'Content-Type: application/json' \
+  -d '{"requests":[{"custom_id":"dup","params":{"model":"gpt-4.1-nano","max_tokens":10,"messages":[{"role":"user","content":"a"}]}},{"custom_id":"dup","params":{"model":"gpt-4.1-nano","max_tokens":10,"messages":[{"role":"user","content":"b"}]}}]}'
+grep -Eiq '^HTTP/.* 400 ' "$HEADERS_FILE"
+jq -e '.error.message | test("not unique")' "$BODY_FILE" >/dev/null
+
+curl -sS -D "$HEADERS_FILE" -o "$BODY_FILE" "$BASE_URL/v1/messages/batches" \
+  -H 'Content-Type: application/json' \
+  -d '{"requests":[{"custom_id":"  ","params":{"model":"gpt-4.1-nano","max_tokens":10,"messages":[{"role":"user","content":"a"}]}}]}'
+grep -Eiq '^HTTP/.* 400 ' "$HEADERS_FILE"
+jq -e '.error.message | test("required")' "$BODY_FILE" >/dev/null
+```
+
+### S190 Message Batch results before ready returns the not-ready envelope (negative)
+
+```bash
+BATCH_ID=$(cat "$QA_RUN_DIR/s183.batch-id")
+HEADERS_FILE="$QA_RUN_DIR/s190.headers"
+BODY_FILE="$QA_RUN_DIR/s190.body"
+curl -sS -D "$HEADERS_FILE" -o "$BODY_FILE" "$BASE_URL/v1/messages/batches/$BATCH_ID/results"
+cat "$BODY_FILE"
+grep -Eiq '^HTTP/.* 409 ' "$HEADERS_FILE"
+jq -e '.error.type == "invalid_request_error" and (.error.message | test("not ready"))' "$BODY_FILE" >/dev/null
+```
+
+### S191 Mixed-provider requests in one Message Batch are rejected (negative)
+
+A single native batch is submitted to one upstream provider; checks a batch
+mixing an Anthropic and an OpenAI model item is rejected before submission,
+the same discipline as the file-based `/v1/batches` mixed-provider check
+(`S48`).
+
+```bash
+HEADERS_FILE="$QA_RUN_DIR/s191.headers"
+BODY_FILE="$QA_RUN_DIR/s191.body"
+curl -sS -D "$HEADERS_FILE" -o "$BODY_FILE" "$BASE_URL/v1/messages/batches" \
+  -H 'Content-Type: application/json' \
+  -d '{"requests":[{"custom_id":"qa-mixed-a","params":{"model":"claude-sonnet-4-6","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}},{"custom_id":"qa-mixed-b","params":{"model":"gpt-4.1-nano","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}}]}'
+cat "$BODY_FILE"
+grep -Eiq '^HTTP/.* 400 ' "$HEADERS_FILE"
+jq -e '.error.message | test("single provider per batch")' "$BODY_FILE" >/dev/null
 ```

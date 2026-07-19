@@ -6,12 +6,13 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/labstack/echo/v5"
 
-	"gomodel/internal/auditlog"
-	"gomodel/internal/core"
-	"gomodel/internal/usage"
+	"github.com/enterpilot/gomodel/internal/auditlog"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/usage"
 )
 
 // maxAuditLogLimit caps the page size accepted by the audit log endpoint and
@@ -161,22 +162,16 @@ func (h *Handler) auditLogResponse(ctx context.Context, result *auditlog.LogList
 		response.Entries[i].LogEntry = result.Entries[i]
 	}
 
-	if h.usageReader == nil || len(result.Entries) == 0 {
-		return response, nil
-	}
-
 	requestIDs := make([]string, 0, len(result.Entries))
 	for _, entry := range result.Entries {
 		requestIDs = append(requestIDs, entry.RequestID)
 	}
 
-	entriesByRequestID, err := h.usageReader.GetUsageByRequestIDs(ctx, requestIDs)
+	summaries, err := usage.SummarizeUsageForRequestIDs(ctx, h.usageReader, requestIDs)
 	if err != nil {
 		slog.Warn("failed to enrich audit log entries with usage", "error", err, "request_count", len(requestIDs))
 		return response, nil
 	}
-
-	summaries := usage.SummarizeUsageByRequestID(entriesByRequestID)
 	for i := range response.Entries {
 		requestID := response.Entries[i].RequestID
 		if summary, ok := summaries[requestID]; ok {
@@ -185,6 +180,67 @@ func (h *Handler) auditLogResponse(ctx context.Context, result *auditlog.LogList
 	}
 
 	return response, nil
+}
+
+// auditStatsHourlyRangeDays is the largest date-range span (in days) that
+// still gets hourly buckets; longer ranges fall back to daily buckets so the
+// chart stays readable.
+const auditStatsHourlyRangeDays = 3
+
+// AuditStats handles GET /admin/audit/stats
+//
+// @Summary      Get time-bucketed request status and latency stats
+// @Description  Returns request counts grouped into 2xx/4xx/5xx status classes
+// @Description  per time bucket, an overall success-rate summary, and average
+// @Description  request duration per provider for the dashboard charts.
+// @Description  Ranges up to 3 days use hourly buckets, longer ranges daily.
+// @Tags         admin
+// @Produce      json
+// @Security     BearerAuth
+// @Param        days        query     int     false  "Number of days (default 30)"
+// @Param        start_date  query     string  false  "Start date (YYYY-MM-DD)"
+// @Param        end_date    query     string  false  "End date (YYYY-MM-DD)"
+// @Success      200  {object}  auditlog.RequestStats
+// @Failure      400  {object}  core.GatewayError
+// @Failure      401  {object}  core.GatewayError
+// @Router       /admin/audit/stats [get]
+func (h *Handler) AuditStats(c *echo.Context) error {
+	// Validate request shape before the disabled-reader fast path so callers
+	// always get a 400 for malformed inputs, regardless of whether audit
+	// logging is configured.
+	dateRange, err := parseDateRangeParams(c)
+	if err != nil {
+		return handleError(c, err)
+	}
+
+	interval := auditlog.StatsIntervalDay
+	if dateRange.EndDate.Sub(dateRange.StartDate) < auditStatsHourlyRangeDays*24*time.Hour {
+		interval = auditlog.StatsIntervalHour
+	}
+
+	if h.auditReader == nil {
+		return c.JSON(http.StatusOK, auditlog.EmptyRequestStats(interval))
+	}
+
+	_, location := dashboardTimeZone(c)
+	params := auditlog.RequestStatsParams{
+		QueryParams: auditlog.QueryParams{
+			StartDate: dateRange.StartDate,
+			EndDate:   dateRange.EndDate,
+		},
+		Interval: interval,
+		Location: location,
+		Now:      timeNow(),
+	}
+
+	stats, err := h.auditReader.GetRequestStats(c.Request().Context(), params)
+	if err != nil {
+		return handleError(c, err)
+	}
+	if stats == nil {
+		stats = auditlog.EmptyRequestStats(interval)
+	}
+	return c.JSON(http.StatusOK, stats)
 }
 
 // AuditLogDetail handles GET /admin/audit/detail.

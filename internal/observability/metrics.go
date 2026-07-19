@@ -3,13 +3,12 @@ package observability
 
 import (
 	"context"
-	"fmt"
 	"strconv"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
-	"gomodel/internal/llmclient"
+	"github.com/enterpilot/gomodel/internal/llmclient"
 )
 
 // Prometheus metrics for LLM gateway observability
@@ -51,7 +50,32 @@ var (
 		},
 		[]string{"provider", "provider_name", "operation"},
 	)
+
+	// CircuitBreakerState reports each provider's circuit breaker state as of
+	// its most recent request (0=closed, 1=half-open, 2=open). The value is
+	// updated per request, so an idle provider keeps its last observed state.
+	CircuitBreakerState = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "gomodel_circuit_breaker_state",
+			Help: "Circuit breaker state per provider (0=closed, 1=half-open, 2=open)",
+		},
+		[]string{"provider"},
+	)
 )
+
+// circuitStateValue maps llmclient circuit state names to gauge values.
+func circuitStateValue(state string) (float64, bool) {
+	switch state {
+	case "closed":
+		return 0, true
+	case "half-open":
+		return 1, true
+	case "open":
+		return 2, true
+	default:
+		return 0, false
+	}
+}
 
 // NewPrometheusHooks returns hooks that instrument LLM requests with Prometheus metrics.
 // These hooks can be injected into llmclient.Config to enable observability without
@@ -110,6 +134,11 @@ func NewPrometheusHooks() llmclient.Hooks {
 				info.Endpoint,
 				streamLabel,
 			).Observe(info.Duration.Seconds())
+
+			// Record circuit breaker state (empty when the breaker is disabled)
+			if value, ok := circuitStateValue(info.CircuitState); ok {
+				CircuitBreakerState.WithLabelValues(info.Provider).Set(value)
+			}
 		},
 	}
 }
@@ -145,44 +174,11 @@ func NewPrometheusHooks() llmclient.Hooks {
 // Panel 5: Requests by Model
 // Query: sum(rate(gomodel_requests_total[5m])) by (model)
 
-// PrometheusMetrics provides access to all registered metrics for testing
-type PrometheusMetrics struct {
-	RequestsTotal                 *prometheus.CounterVec
-	RequestDuration               *prometheus.HistogramVec
-	InFlightRequests              *prometheus.GaugeVec
-	ResponseSnapshotStoreFailures *prometheus.CounterVec
-}
-
-// GetMetrics returns the prometheus metrics for testing and introspection
-func GetMetrics() *PrometheusMetrics {
-	return &PrometheusMetrics{
-		RequestsTotal:                 RequestsTotal,
-		RequestDuration:               RequestDuration,
-		InFlightRequests:              InFlightRequests,
-		ResponseSnapshotStoreFailures: ResponseSnapshotStoreFailures,
-	}
-}
-
 // ResetMetrics resets all metrics to zero (useful for testing)
 func ResetMetrics() {
 	RequestsTotal.Reset()
 	RequestDuration.Reset()
 	InFlightRequests.Reset()
 	ResponseSnapshotStoreFailures.Reset()
-}
-
-// HealthCheck verifies that metrics are being collected
-func HealthCheck() error {
-	// Try to collect metrics
-	mfs, err := prometheus.DefaultGatherer.Gather()
-	if err != nil {
-		return fmt.Errorf("failed to gather metrics: %w", err)
-	}
-
-	// Check that we have some metrics
-	if len(mfs) == 0 {
-		return fmt.Errorf("no metrics registered")
-	}
-
-	return nil
+	CircuitBreakerState.Reset()
 }

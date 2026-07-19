@@ -13,7 +13,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/core"
 )
 
 // API endpoints
@@ -43,7 +43,7 @@ func sendResponsesRequestWithHeaders(t *testing.T, serverURL string, payload cor
 }
 
 // sendJSONRequest sends a JSON POST request and returns the response.
-func sendJSONRequest(t *testing.T, url string, payload interface{}, headers map[string]string) *http.Response {
+func sendJSONRequest(t *testing.T, url string, payload any, headers map[string]string) *http.Response {
 	t.Helper()
 
 	body, err := json.Marshal(payload)

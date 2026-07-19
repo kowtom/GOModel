@@ -1,4 +1,4 @@
-.PHONY: all build run clean tidy test test-race test-dashboard test-e2e test-integration test-contract test-all lint lint-fix record-api swagger docs-openapi install-tools perf-check perf-bench infra image seed-demo-data kind-up kind-down dev-k8s deploy-k8s undeploy-k8s
+.PHONY: all build run demo clean tidy test test-race test-dashboard test-e2e test-integration test-contract test-all lint lint-fix fix fix-check record-api swagger docs-openapi install-tools perf-check perf-bench infra image seed-demo-data kind-up kind-down dev-k8s deploy-k8s undeploy-k8s
 
 all: build
 
@@ -10,10 +10,14 @@ DOCS_API_SERVERS ?= http://localhost:8080
 LOG_LEVEL ?= debug
 SWAGGER_ENABLED ?= true
 
+# Build tags covering every file the linter and fixers must see. Without these,
+# tag-gated files (tests/e2e, tests/integration, tests/contract) are skipped.
+BUILD_TAGS ?= swagger,e2e,integration,contract
+
 # Linker flags to inject version info
-LDFLAGS := -X "gomodel/internal/version.Version=$(VERSION)" \
-           -X "gomodel/internal/version.Commit=$(COMMIT)" \
-           -X "gomodel/internal/version.Date=$(DATE)"
+LDFLAGS := -X "github.com/enterpilot/gomodel/internal/version.Version=$(VERSION)" \
+           -X "github.com/enterpilot/gomodel/internal/version.Commit=$(COMMIT)" \
+           -X "github.com/enterpilot/gomodel/internal/version.Date=$(DATE)"
 
 install-tools:
 	@command -v golangci-lint > /dev/null 2>&1 || (echo "Installing golangci-lint..." && go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10)
@@ -25,6 +29,10 @@ build:
 # Run the application
 run:
 	LOG_LEVEL=$(LOG_LEVEL) SWAGGER_ENABLED=$(SWAGGER_ENABLED) go run -tags=swagger ./cmd/gomodel
+
+# Seed the local SQLite database and start GoModel with a populated dashboard.
+demo: seed-demo-data
+	$(MAKE) run
 
 # Clean build artifacts
 clean:
@@ -42,7 +50,7 @@ infra:
 image:
 	docker compose --profile app up -d
 
-# Seed rolling demo usage/audit data into SQLite.
+# Seed rolling demo telemetry and dashboard configuration into SQLite.
 # Usage: SQLITE_PATH=data/gomodel.db make seed-demo-data
 seed-demo-data:
 	bash tools/seed-demo-data.sh
@@ -151,8 +159,23 @@ docs-openapi:
 
 # Run linter
 lint:
-	golangci-lint run --build-tags=swagger,e2e,integration,contract ./cmd/... ./config/... ./internal/... ./tests/...
+	golangci-lint run --build-tags=$(BUILD_TAGS) ./cmd/... ./config/... ./internal/... ./tests/...
 
-# Run linter with auto-fix
+# Run linter with auto-fix. Mirrors `lint`: same tags, same packages, so the
+# autofix pass cannot silently skip the tag-gated files under tests/.
 lint-fix:
-	golangci-lint run --fix ./cmd/... ./config/... ./internal/...
+	golangci-lint run --fix --build-tags=$(BUILD_TAGS) ./cmd/... ./config/... ./internal/... ./tests/...
+
+# Report modernizations go fix would apply, without touching the tree.
+# Exits non-zero when the tree has drifted; run `make fix` to apply.
+fix-check:
+	go fix -diff -tags=$(BUILD_TAGS) ./...
+
+# Apply go fix modernizations in place.
+#
+# Not idempotent in one pass: when go fix marks a helper `//go:fix inline` it
+# inlines the callers on the *next* run, which can leave the helper orphaned.
+# Re-run until `make fix-check` is clean, then delete any helper `make lint`
+# now reports as unused.
+fix:
+	go fix -tags=$(BUILD_TAGS) ./...

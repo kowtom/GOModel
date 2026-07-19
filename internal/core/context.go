@@ -35,6 +35,11 @@ const (
 	// to include usage when the provider supports it.
 	enforceReturningUsageDataKey contextKey = "enforce-returning-usage-data"
 
+	// primaryRouteSaturatedKey stores the rate-limit rejection for the
+	// resolved primary route when failover targets exist: dispatch skips the
+	// primary provider and sweeps failover instead of returning 429 outright.
+	primaryRouteSaturatedKey contextKey = "primary-route-saturated"
+
 	// guardrailsHashKey stores the SHA-256 hash of the applied guardrail rules
 	// for the current request. Set by the translated inference handlers after
 	// PatchChatRequest; consumed by the semantic cache to build params_hash.
@@ -49,6 +54,11 @@ const (
 	// requestOriginKey stores the logical request origin for internal execution
 	// flows that still reuse the translated request pipeline.
 	requestOriginKey contextKey = "request-origin"
+
+	// rewriteTokensSavedKey stores the total prompt tokens that applied
+	// request rewriters estimate they removed from the request body. Usage
+	// recording folds it into the request's usage entry as rewrite savings.
+	rewriteTokensSavedKey contextKey = "rewrite-tokens-saved"
 )
 
 // RequestOrigin identifies whether a request came from an external caller or an
@@ -193,6 +203,28 @@ func GetEnforceReturningUsageData(ctx context.Context) bool {
 	return false
 }
 
+// WithPrimaryRouteSaturated marks the resolved primary route as rate-saturated.
+// The stored error is the 429 the client would have received; dispatch uses it
+// as the synthetic primary failure that triggers the failover sweep, and it
+// surfaces unchanged when no failover target can take the request.
+func WithPrimaryRouteSaturated(ctx context.Context, err error) context.Context {
+	if err == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, primaryRouteSaturatedKey, err)
+}
+
+// PrimaryRouteSaturated returns the rate-limit rejection recorded for the
+// resolved primary route, or nil when the route has capacity.
+func PrimaryRouteSaturated(ctx context.Context) error {
+	if v := ctx.Value(primaryRouteSaturatedKey); v != nil {
+		if err, ok := v.(error); ok {
+			return err
+		}
+	}
+	return nil
+}
+
 // WithGuardrailsHash returns a new context with the guardrails hash attached.
 // The hash is the SHA-256 of all applied guardrail rule IDs and their versions,
 // computed post-patch in the translated inference handlers.
@@ -224,6 +256,27 @@ func GetFailoverUsed(ctx context.Context) bool {
 		}
 	}
 	return false
+}
+
+// WithRewriteTokensSaved returns a new context carrying the total prompt
+// tokens that applied request rewriters estimate they removed. Non-positive
+// totals leave the context unchanged.
+func WithRewriteTokensSaved(ctx context.Context, tokensSaved int) context.Context {
+	if tokensSaved <= 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, rewriteTokensSavedKey, tokensSaved)
+}
+
+// RewriteTokensSavedFromContext retrieves the request's rewrite savings
+// estimate, or zero when no rewriter reported savings.
+func RewriteTokensSavedFromContext(ctx context.Context) int {
+	if v := ctx.Value(rewriteTokensSavedKey); v != nil {
+		if saved, ok := v.(int); ok && saved > 0 {
+			return saved
+		}
+	}
+	return 0
 }
 
 // WithRequestOrigin returns a new context with the logical request origin attached.

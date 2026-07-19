@@ -2,12 +2,13 @@ package failover
 
 import (
 	"math"
+	"slices"
 	"sort"
 	"strings"
 
-	"gomodel/config"
-	"gomodel/internal/core"
-	"gomodel/internal/providers"
+	"github.com/enterpilot/gomodel/config"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/providers"
 )
 
 const maxAutoFailoverCandidates = 5
@@ -42,14 +43,9 @@ type Resolver struct {
 	registry     Registry
 }
 
-// NewResolver builds a failover resolver from config and the current model
-// inventory. Returns nil when failover is effectively disabled.
-func NewResolver(cfg config.FailoverConfig, registry Registry) *Resolver {
-	return NewResolverWithRuleProvider(cfg, registry, nil)
-}
-
-// NewResolverWithRuleProvider builds a resolver backed by static config and an
-// optional dynamic manual-rule provider.
+// NewResolverWithRuleProvider builds a failover resolver from config and the
+// current model inventory, backed by an optional dynamic manual-rule provider.
+// Returns nil when failover is effectively disabled.
 func NewResolverWithRuleProvider(cfg config.FailoverConfig, registry Registry, ruleProvider RuleProvider) *Resolver {
 	if registry == nil {
 		return nil
@@ -327,13 +323,10 @@ func (r *Resolver) autoSelectorsFor(
 		return a.key < b.key
 	})
 
-	limit := maxAutoFailoverCandidates
-	if len(candidates) < limit {
-		limit = len(candidates)
-	}
+	limit := min(len(candidates), maxAutoFailoverCandidates)
 
 	result := make([]core.ModelSelector, 0, limit)
-	for i := 0; i < limit; i++ {
+	for i := range limit {
 		seen[candidates[i].key] = struct{}{}
 		result = append(result, candidates[i].selector)
 	}
@@ -420,12 +413,7 @@ func supportsCategory(meta *core.ModelMetadata, required core.ModelCategory) boo
 	if required == "" {
 		return true
 	}
-	for _, category := range meta.Categories {
-		if category == required {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(meta.Categories, required)
 }
 
 func preferredRanking(rankings map[string]core.ModelRanking) (string, core.ModelRanking, bool) {

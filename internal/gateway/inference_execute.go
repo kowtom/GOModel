@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"gomodel/internal/core"
-	"gomodel/internal/usage"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/usage"
 )
 
 // ExecuteChatCompletion executes a non-streaming chat request and records usage on success.
@@ -396,13 +396,19 @@ func streamTranslatedProviderRequest[Req any](
 	call func(context.Context, Req) (io.ReadCloser, error),
 ) (io.ReadCloser, string, string, string, string, bool, error) {
 	started := time.Now()
-	stream, err := call(ctx, req)
-	if err == nil && stream != nil {
-		recordProviderAttempt(ctx, providerAttemptFromResult(AttemptKindPrimary, providerType, providerName, currentSelectorForWorkflow(workflow, model, provider), started, nil))
-		return stream, providerType, providerName, usageModel, "", false, nil
-	}
+	var stream io.ReadCloser
+	// See executeTranslatedWithFailover: a rate-saturated primary route skips
+	// the provider call and enters the failover sweep with its stored 429.
+	err := core.PrimaryRouteSaturated(ctx)
 	if err == nil {
-		err = emptyProviderStreamError(providerType)
+		stream, err = call(ctx, req)
+		if err == nil && stream != nil {
+			recordProviderAttempt(ctx, providerAttemptFromResult(AttemptKindPrimary, providerType, providerName, currentSelectorForWorkflow(workflow, model, provider), started, nil))
+			return stream, providerType, providerName, usageModel, "", false, nil
+		}
+		if err == nil {
+			err = emptyProviderStreamError(providerType)
+		}
 	}
 	recordProviderAttempt(ctx, providerAttemptFromResult(AttemptKindPrimary, providerType, providerName, currentSelectorForWorkflow(workflow, model, provider), started, err))
 

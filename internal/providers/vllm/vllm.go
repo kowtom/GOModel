@@ -7,10 +7,10 @@ import (
 	"net/http"
 	"strings"
 
-	"gomodel/internal/core"
-	"gomodel/internal/llmclient"
-	"gomodel/internal/providers"
-	"gomodel/internal/providers/openai"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/llmclient"
+	"github.com/enterpilot/gomodel/internal/providers"
+	"github.com/enterpilot/gomodel/internal/providers/openai"
 )
 
 const defaultBaseURL = "http://localhost:8000/v1"
@@ -143,8 +143,8 @@ func (p *Provider) Passthrough(ctx context.Context, req *core.PassthroughRequest
 
 func passthroughBaseURL(baseURL string) string {
 	trimmed := strings.TrimRight(strings.TrimSpace(baseURL), "/")
-	if strings.HasSuffix(trimmed, "/v1") {
-		return strings.TrimSuffix(trimmed, "/v1")
+	if before, ok := strings.CutSuffix(trimmed, "/v1"); ok {
+		return before
 	}
 	return trimmed
 }

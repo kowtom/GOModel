@@ -13,11 +13,12 @@ import (
 	"github.com/stretchr/testify/require"
 	_ "modernc.org/sqlite"
 
-	"gomodel/internal/admin"
-	"gomodel/internal/admin/dashboard"
-	"gomodel/internal/providers"
-	"gomodel/internal/server"
-	"gomodel/internal/usage"
+	"github.com/enterpilot/gomodel/internal/admin"
+	"github.com/enterpilot/gomodel/internal/admin/dashboard"
+	"github.com/enterpilot/gomodel/internal/mcpgateway"
+	"github.com/enterpilot/gomodel/internal/providers"
+	"github.com/enterpilot/gomodel/internal/server"
+	"github.com/enterpilot/gomodel/internal/usage"
 )
 
 type e2eServerOptions struct {
@@ -28,8 +29,19 @@ type e2eServerOptions struct {
 	adminOptions          []admin.Option
 	usageLogger           usage.LoggerInterface
 	budgetChecker         server.BudgetChecker
+	rateLimiter           server.RateLimiter
 	pricingResolver       usage.PricingResolver
 	providerType          string
+	// registry, when set, replaces the fixture's own registry so tests can
+	// share it with collaborators built around the same catalog (virtual
+	// models, rate-limit capacity probes).
+	registry *providers.ModelRegistry
+	// modelResolver and failoverResolver mirror the app wiring for alias
+	// resolution and translated-route failover.
+	modelResolver    server.RequestModelResolver
+	failoverResolver server.RequestFailoverResolver
+	// mcpGateway enables the /mcp routes when set.
+	mcpGateway *mcpgateway.Service
 }
 
 type e2eUsageFixture struct {
@@ -73,7 +85,10 @@ func setupE2EAdminServer(t *testing.T, opts e2eServerOptions) *httptest.Server {
 func setupE2EServer(t *testing.T, opts e2eServerOptions) *server.Server {
 	t.Helper()
 
-	registry := setupE2ERegistry(t, opts.providerType)
+	registry := opts.registry
+	if registry == nil {
+		registry = setupE2ERegistry(t, opts.providerType)
+	}
 	router, err := providers.NewRouter(registry)
 	require.NoError(t, err, "failed to create router")
 
@@ -81,8 +96,15 @@ func setupE2EServer(t *testing.T, opts e2eServerOptions) *server.Server {
 		MasterKey:             opts.masterKey,
 		UsageLogger:           opts.usageLogger,
 		BudgetChecker:         opts.budgetChecker,
+		RateLimiter:           opts.rateLimiter,
 		PricingResolver:       opts.pricingResolver,
+		ModelResolver:         opts.modelResolver,
+		FailoverResolver:      opts.failoverResolver,
 		AdminEndpointsEnabled: opts.adminEndpointsEnabled,
+	}
+	if opts.mcpGateway != nil {
+		cfg.MCPEnabled = true
+		cfg.MCPGateway = opts.mcpGateway
 	}
 
 	if opts.adminEndpointsEnabled {
@@ -91,7 +113,7 @@ func setupE2EServer(t *testing.T, opts e2eServerOptions) *server.Server {
 
 	if opts.adminUIEnabled {
 		cfg.AdminUIEnabled = true
-		dashHandler, err := dashboard.New()
+		dashHandler, err := dashboard.NewWithBasePath("/")
 		require.NoError(t, err, "failed to create dashboard handler")
 		cfg.DashboardHandler = dashHandler
 	}

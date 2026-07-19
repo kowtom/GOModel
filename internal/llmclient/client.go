@@ -21,9 +21,9 @@ import (
 
 	"github.com/goccy/go-json"
 
-	"gomodel/config"
-	"gomodel/internal/core"
-	"gomodel/internal/httpclient"
+	"github.com/enterpilot/gomodel/config"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/httpclient"
 )
 
 // RequestInfo contains metadata about a request for observability hooks
@@ -44,6 +44,11 @@ type ResponseInfo struct {
 	Duration   time.Duration // Request duration
 	Stream     bool          // Whether this was a streaming request
 	Error      error         // Error if request failed (nil on success)
+	// CircuitState is the provider's circuit breaker state after this request
+	// completed ("closed", "half-open", "open"); empty when the breaker is
+	// disabled. It reflects the moment of completion, so metrics built from it
+	// update as traffic flows.
+	CircuitState string
 }
 
 // Hooks defines observability callbacks for request lifecycle events.
@@ -116,20 +121,8 @@ func New(cfg Config, headerSetter HeaderSetter) *Client {
 
 // NewWithHTTPClient creates a new LLM client with a custom HTTP client
 func NewWithHTTPClient(httpClient *http.Client, cfg Config, headerSetter HeaderSetter) *Client {
-	c := &Client{
-		httpClient:   httpClient,
-		config:       cfg,
-		headerSetter: headerSetter,
-	}
-
-	if cfg.CircuitBreaker.FailureThreshold > 0 {
-		c.circuitBreaker = newCircuitBreaker(
-			cfg.CircuitBreaker.FailureThreshold,
-			cfg.CircuitBreaker.SuccessThreshold,
-			cfg.CircuitBreaker.Timeout,
-		)
-	}
-
+	c := New(cfg, headerSetter)
+	c.httpClient = httpClient
 	return c
 }
 
@@ -142,13 +135,6 @@ func (c *Client) SetBaseURL(url string) {
 
 // BaseURL returns the current base URL (thread-safe)
 func (c *Client) BaseURL() string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.config.BaseURL
-}
-
-// getBaseURL returns the base URL for internal use (already holding lock or single-threaded)
-func (c *Client) getBaseURL() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.config.BaseURL
@@ -177,6 +163,11 @@ type Response struct {
 	Header http.Header
 	Body   []byte
 }
+
+// maxErrorBodyBytes caps how much of an upstream error body is read into
+// memory. It matches core's audit capture cap; a misbehaving upstream that
+// answers an error status with an endless body must not be buffered whole.
+const maxErrorBodyBytes = 64 * 1024
 
 // attachResponseHeaders records the upstream response headers on a provider
 // GatewayError so failed attempts can be audited. It is a no-op for other
@@ -234,14 +225,19 @@ func (c *Client) finishRequest(scope requestScope, statusCode int, err error) {
 	if c.config.Hooks.OnRequestEnd == nil {
 		return
 	}
+	circuitState := ""
+	if c.circuitBreaker != nil {
+		circuitState = c.circuitBreaker.State()
+	}
 	c.config.Hooks.OnRequestEnd(scope.ctx, ResponseInfo{
-		Provider:   c.config.ProviderName,
-		Model:      scope.requestInfo.Model,
-		Endpoint:   scope.requestInfo.Endpoint,
-		StatusCode: statusCode,
-		Duration:   time.Since(scope.startedAt),
-		Stream:     scope.requestInfo.Stream,
-		Error:      err,
+		Provider:     c.config.ProviderName,
+		Model:        scope.requestInfo.Model,
+		Endpoint:     scope.requestInfo.Endpoint,
+		StatusCode:   statusCode,
+		Duration:     time.Since(scope.startedAt),
+		Stream:       scope.requestInfo.Stream,
+		Error:        err,
+		CircuitState: circuitState,
 	})
 }
 
@@ -250,8 +246,25 @@ func (c *Client) finishRequest(scope requestScope, statusCode int, err error) {
 // whether the failure was transport-level) and emits the metrics observation.
 // Use this whenever a code path returns from one of the public Do* methods.
 func (c *Client) completeScope(scope requestScope, statusCode int, err, cbErr error) {
-	c.recordCircuitBreakerCompletion(statusCode, cbErr)
+	c.recordCircuitBreakerCompletion(scope, statusCode, cbErr)
 	c.finishRequest(scope, statusCode, err)
+}
+
+// finishRequestWithoutBreaker finalises a request that never reached the
+// upstream (local request-build errors): no breaker outcome is recorded, but
+// a consumed half-open probe slot must still be returned or the breaker would
+// reject all traffic forever.
+func (c *Client) finishRequestWithoutBreaker(scope requestScope, statusCode int, err error) {
+	c.releaseHalfOpenProbe(scope)
+	c.finishRequest(scope, statusCode, err)
+}
+
+// releaseHalfOpenProbe frees the breaker's probe slot when this request held
+// it but ended without a success/failure verdict.
+func (c *Client) releaseHalfOpenProbe(scope requestScope) {
+	if c.circuitBreaker != nil && scope.halfOpenProbe {
+		c.circuitBreaker.releaseProbe()
+	}
 }
 
 // failAfterRetries handles the "exhausted retries with no captured error"
@@ -274,11 +287,19 @@ func (c *Client) waitForRetryAttempt(ctx context.Context, scope requestScope, at
 	return nil
 }
 
-func (c *Client) recordCircuitBreakerCompletion(statusCode int, err error) {
+func (c *Client) recordCircuitBreakerCompletion(scope requestScope, statusCode int, err error) {
 	if c.circuitBreaker == nil {
 		return
 	}
 	if err != nil {
+		// A caller-side cancellation aborts the transport but proves nothing
+		// about provider health, so it is neither a success nor a failure.
+		// Client deadlines (context.DeadlineExceeded) still count: the
+		// provider failed to answer within the latency budget.
+		if errors.Is(err, context.Canceled) {
+			c.releaseHalfOpenProbe(scope)
+			return
+		}
 		c.circuitBreaker.RecordFailure()
 		return
 	}
@@ -364,6 +385,7 @@ func (c *Client) Do(ctx context.Context, req Request, result any) error {
 func (c *Client) DoRaw(ctx context.Context, req Request) (*Response, error) {
 	scope, err := c.beginRequest(ctx, req, false)
 	if err != nil {
+		closeRawBodyReader(req)
 		return nil, err
 	}
 	ctx = scope.ctx
@@ -378,6 +400,7 @@ func (c *Client) DoRaw(ctx context.Context, req Request) (*Response, error) {
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if err := c.waitForRetryAttempt(ctx, scope, attempt); err != nil {
+			closeRawBodyReader(req)
 			return nil, err
 		}
 
@@ -391,7 +414,7 @@ func (c *Client) DoRaw(ctx context.Context, req Request) (*Response, error) {
 			// entirely (a 400 with cbErr=nil would otherwise be recorded as
 			// a success by recordCircuitBreakerCompletion).
 			if isLocalRequestBuildError(err) {
-				c.finishRequest(scope, lastStatusCode, err)
+				c.finishRequestWithoutBreaker(scope, lastStatusCode, err)
 				return nil, err
 			}
 			lastErrFromTransport = true
@@ -446,6 +469,7 @@ func (c *Client) DoRaw(ctx context.Context, req Request) (*Response, error) {
 func (c *Client) DoStream(ctx context.Context, req Request) (io.ReadCloser, error) {
 	scope, err := c.beginRequest(ctx, req, true)
 	if err != nil {
+		closeRawBodyReader(req)
 		return nil, err
 	}
 
@@ -455,7 +479,7 @@ func (c *Client) DoStream(ctx context.Context, req Request) (io.ReadCloser, erro
 		// Caller-side build errors never reached the upstream — skip the
 		// breaker entirely so neither RecordFailure nor RecordSuccess fires.
 		if isLocalRequestBuildError(err) {
-			c.finishRequest(scope, statusCode, err)
+			c.finishRequestWithoutBreaker(scope, statusCode, err)
 			return nil, err
 		}
 		c.completeScope(scope, statusCode, err, err)
@@ -463,7 +487,7 @@ func (c *Client) DoStream(ctx context.Context, req Request) (io.ReadCloser, erro
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, readErr := io.ReadAll(resp.Body)
+		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
 		if readErr != nil {
 			respBody = []byte("failed to read error response")
 		}
@@ -472,6 +496,15 @@ func (c *Client) DoStream(ctx context.Context, req Request) (io.ReadCloser, erro
 		providerErr := attachResponseHeaders(core.ParseProviderError(c.config.ProviderName, resp.StatusCode, respBody, nil), resp.Header)
 		c.completeScope(scope, resp.StatusCode, providerErr, nil)
 		return nil, providerErr
+	}
+
+	// The stream can outlive the request by minutes while transport internals
+	// keep resp.Request reachable. GetBody closes over the fully marshaled
+	// request payload; redirects and transparent transport retries only
+	// consult it inside Do, so dropping it here releases the payload for the
+	// stream's lifetime without changing behavior.
+	if resp.Request != nil {
+		resp.Request.GetBody = nil
 	}
 
 	c.completeScope(scope, resp.StatusCode, nil, nil)
@@ -513,6 +546,7 @@ func (c *Client) DoPassthrough(ctx context.Context, req Request) (*http.Response
 	stream := strings.Contains(strings.ToLower(strings.Join(req.Headers.Values("Accept"), ",")), "text/event-stream")
 	scope, err := c.beginRequest(ctx, req, stream)
 	if err != nil {
+		closeRawBodyReader(req)
 		return nil, err
 	}
 	ctx = scope.ctx
@@ -524,6 +558,7 @@ func (c *Client) DoPassthrough(ctx context.Context, req Request) (*http.Response
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if err := c.waitForRetryAttempt(ctx, scope, attempt); err != nil {
+			closeRawBodyReader(req)
 			return nil, err
 		}
 
@@ -534,7 +569,7 @@ func (c *Client) DoPassthrough(ctx context.Context, req Request) (*http.Response
 			// skip the breaker entirely (cbErr=nil would otherwise record a
 			// spurious success for a 400-class status).
 			if isLocalRequestBuildError(err) {
-				c.finishRequest(scope, statusCode, err)
+				c.finishRequestWithoutBreaker(scope, statusCode, err)
 				return nil, err
 			}
 			if scope.halfOpenProbe || isClientTimeoutGatewayError(err) || attempt == maxAttempts-1 {
@@ -562,9 +597,15 @@ func (c *Client) DoPassthrough(ctx context.Context, req Request) (*http.Response
 }
 
 // extractModel attempts to extract the model name from a request body
+// UnknownModel is the model label reported for requests whose model cannot be
+// recovered from the request body (body-less discovery GETs, availability
+// probes, multipart uploads). Hook consumers that attribute traffic per model
+// should treat it as "not model-attributed".
+const UnknownModel = "unknown"
+
 func extractModel(body any) string {
 	if body == nil {
-		return "unknown"
+		return UnknownModel
 	}
 
 	// Try ChatRequest
@@ -584,17 +625,13 @@ func extractModel(body any) string {
 	}
 
 	// Unknown request type
-	return "unknown"
+	return UnknownModel
 }
 
 // extractStatusCode tries to extract HTTP status code from an error
 func extractStatusCode(err error) int {
-	if err == nil {
-		return 0
-	}
-
-	// Try to extract from GatewayError
-	if gwErr, ok := err.(*core.GatewayError); ok {
+	var gwErr *core.GatewayError
+	if errors.As(err, &gwErr) {
 		return gwErr.StatusCode
 	}
 
@@ -608,6 +645,9 @@ func extractStatusCode(err error) int {
 func (c *Client) doHTTPRequest(ctx context.Context, req Request) (*http.Response, error) {
 	httpReq, err := c.buildRequest(ctx, req)
 	if err != nil {
+		// The transport owns closing the body once the request reaches it;
+		// a request that never gets there must release the reader here.
+		closeRawBodyReader(req)
 		return nil, err
 	}
 
@@ -616,6 +656,17 @@ func (c *Client) doHTTPRequest(ctx context.Context, req Request) (*http.Response
 		return nil, core.NewProviderError(c.config.ProviderName, providerErrorStatusCode(err), "failed to send request: "+err.Error(), err)
 	}
 	return resp, nil
+}
+
+// closeRawBodyReader releases a caller-supplied streaming body when the
+// request fails before reaching the HTTP transport, which otherwise closes it
+// on every path. Pipe-backed uploads (files, audio transcription) rely on
+// this to unblock their producer goroutines instead of leaking them — and the
+// upload buffers they pin — for the process lifetime.
+func closeRawBodyReader(req Request) {
+	if closer, ok := req.RawBodyReader.(io.Closer); ok {
+		_ = closer.Close()
+	}
 }
 
 // doRequest executes a single HTTP request without retries.
@@ -630,7 +681,14 @@ func (c *Client) doRequest(ctx context.Context, req Request) (*Response, error) 
 		_ = resp.Body.Close()
 	}()
 
-	body, err := io.ReadAll(resp.Body)
+	// Successful responses are read whole (large results are legitimate);
+	// error bodies are bounded — they only feed error parsing and audit
+	// capture, both of which cap at the same size.
+	reader := io.Reader(resp.Body)
+	if resp.StatusCode >= http.StatusBadRequest {
+		reader = io.LimitReader(resp.Body, maxErrorBodyBytes)
+	}
+	body, err := io.ReadAll(reader)
 	if err != nil {
 		return nil, core.NewProviderError(c.config.ProviderName, providerErrorStatusCode(err), "failed to read response: "+err.Error(), err)
 	}
@@ -661,7 +719,7 @@ func (c *Client) buildRequest(ctx context.Context, req Request) (*http.Request, 
 		return nil, core.NewInvalidRequestError(fmt.Sprintf("invalid HTTP method: %s", req.Method), nil)
 	}
 
-	url := c.getBaseURL() + req.Endpoint
+	url := c.BaseURL() + req.Endpoint
 
 	var bodyReader io.Reader
 	bodySources := 0

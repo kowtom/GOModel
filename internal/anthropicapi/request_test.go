@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/core"
 )
 
 func mustDecode(t *testing.T, body string) *MessagesRequest {
@@ -365,14 +365,21 @@ func TestToChatRequestExtraFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ToChatRequest: %v", err)
 	}
-	for key, want := range map[string]string{
-		"stop":  `["STOP"]`,
-		"top_p": `0.9`,
-		"user":  `"u-123"`,
-	} {
-		raw := chat.ExtraFields.Lookup(key)
-		if string(raw) != want {
-			t.Errorf("ExtraFields[%q] = %s, want %s", key, raw, want)
+	if raw := chat.ExtraFields.Lookup("stop"); string(raw) != `["STOP"]` {
+		t.Errorf("ExtraFields[stop] = %s, want [\"STOP\"]", raw)
+	}
+	// top_p and user have typed ChatRequest fields; they must land there so
+	// internal consumers of the typed fields (Responses lowering, provider
+	// adapters) see them, and must not also ride in ExtraFields.
+	if chat.TopP == nil || *chat.TopP != 0.9 {
+		t.Errorf("TopP = %v, want 0.9", chat.TopP)
+	}
+	if chat.User != "u-123" {
+		t.Errorf("User = %q, want u-123", chat.User)
+	}
+	for _, key := range []string{"top_p", "user"} {
+		if raw := chat.ExtraFields.Lookup(key); len(raw) > 0 {
+			t.Errorf("ExtraFields[%q] = %s, want typed field only", key, raw)
 		}
 	}
 	// top_k has no portable OpenAI-compatible equivalent and OpenAI-family
@@ -445,5 +452,58 @@ func TestToChatRequestRoundTripsAsJSON(t *testing.T) {
 	}
 	if _, err := json.Marshal(chat); err != nil {
 		t.Fatalf("json.Marshal(chat): %v", err)
+	}
+}
+
+func TestEstimateChatInputTokens(t *testing.T) {
+	tests := []struct {
+		name string
+		req  *core.ChatRequest
+		want int
+	}{
+		{
+			name: "nil request",
+			req:  nil,
+			want: 0,
+		},
+		{
+			name: "messages only",
+			req: &core.ChatRequest{
+				Messages: []core.Message{
+					{Role: "system", Content: "You are terse."},
+					{Role: "user", Content: "What is 2+2?"},
+				},
+			},
+			// "You are terse." (14) + "What is 2+2?" (12) = 26 chars → ceil(26/4) = 7
+			want: 7,
+		},
+		{
+			name: "tool calls and tool definitions",
+			req: &core.ChatRequest{
+				Messages: []core.Message{
+					{
+						Role: "assistant",
+						ToolCalls: []core.ToolCall{
+							{Function: core.FunctionCall{Name: "weather", Arguments: `{"city":"Paris"}`}},
+						},
+					},
+				},
+				Tools: []map[string]any{
+					{"type": "function", "function": map[string]any{"name": "weather"}},
+				},
+			},
+			// "weather" (7) + `{"city":"Paris"}` (16) = 23 chars, plus the
+			// marshaled tool definition
+			// `{"function":{"name":"weather"},"type":"function"}` (49 chars).
+			// Total 72 chars → ceil(72/4) = 18.
+			want: 18,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := EstimateChatInputTokens(tc.req); got != tc.want {
+				t.Errorf("estimate = %d, want %d", got, tc.want)
+			}
+		})
 	}
 }

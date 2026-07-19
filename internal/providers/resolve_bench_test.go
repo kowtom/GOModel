@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/core"
 )
 
 // buildBenchRegistry creates a registry holding exactly totalModels models,
@@ -17,7 +17,7 @@ func buildBenchRegistry(providersN, totalModels int) *ModelRegistry {
 		provs[p] = &mockProvider{name: fmt.Sprintf("prov%d", p)}
 	}
 	entries := make([]registryModelEntry, 0, totalModels)
-	for i := 0; i < totalModels; i++ {
+	for i := range totalModels {
 		p := i % providersN
 		entries = append(entries, registryModelEntry{
 			provider:     provs[p],

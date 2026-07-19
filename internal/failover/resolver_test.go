@@ -3,10 +3,17 @@ package failover
 import (
 	"testing"
 
-	"gomodel/config"
-	"gomodel/internal/core"
-	"gomodel/internal/providers"
+	"github.com/enterpilot/gomodel/config"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/providers"
 )
+
+// NewResolver builds a failover resolver from config and the current model
+// inventory without a dynamic manual-rule provider. Test-only convenience
+// over NewResolverWithRuleProvider.
+func NewResolver(cfg config.FailoverConfig, registry Registry) *Resolver {
+	return NewResolverWithRuleProvider(cfg, registry, nil)
+}
 
 type fakeRegistry struct {
 	byKey  map[string]*providers.ModelInfo
@@ -334,7 +341,7 @@ func modelInfoWithCategories(
 				Rankings: map[string]core.ModelRanking{
 					"chatbot_arena": {
 						Elo:  &elo,
-						Rank: intPtr(1),
+						Rank: new(1),
 						AsOf: "2026-02-22",
 					},
 				},
@@ -343,8 +350,4 @@ func modelInfoWithCategories(
 		ProviderName: providerName,
 		ProviderType: providerType,
 	}
-}
-
-func intPtr(v int) *int {
-	return &v
 }

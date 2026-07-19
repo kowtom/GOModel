@@ -13,7 +13,7 @@ import (
 
 	"github.com/goccy/go-json"
 
-	"gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/core"
 )
 
 type geminiGenerateContentRequest struct {
@@ -95,7 +95,7 @@ type geminiFunctionCallingConfig struct {
 type geminiGenerateContentResponse struct {
 	Candidates     []geminiCandidate   `json:"candidates,omitempty"`
 	PromptFeedback json.RawMessage     `json:"promptFeedback,omitempty"`
-	UsageMetadata  geminiUsageMetadata `json:"usageMetadata,omitempty"`
+	UsageMetadata  geminiUsageMetadata `json:"usageMetadata"`
 	ModelVersion   string              `json:"modelVersion,omitempty"`
 	ResponseID     string              `json:"responseId,omitempty"`
 	ModelStatus    json.RawMessage     `json:"modelStatus,omitempty"`
@@ -107,7 +107,7 @@ type geminiPromptFeedback struct {
 }
 
 type geminiCandidate struct {
-	Content       geminiContent   `json:"content,omitempty"`
+	Content       geminiContent   `json:"content"`
 	FinishReason  string          `json:"finishReason,omitempty"`
 	Index         int             `json:"index,omitempty"`
 	SafetyRatings json.RawMessage `json:"safetyRatings,omitempty"`

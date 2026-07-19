@@ -1,9 +1,10 @@
 package gateway
 
 import (
+	"maps"
 	"strings"
 
-	"gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/core"
 )
 
 // CloneChatRequestForStreamUsage clones chat stream options before usage mutation.
@@ -62,9 +63,7 @@ func CloneResponsesRequestForSelector(req *core.ResponsesRequest, selector core.
 	cloned.Tools = cloneToolMaps(req.Tools)
 	if req.Metadata != nil {
 		cloned.Metadata = make(map[string]string, len(req.Metadata))
-		for key, value := range req.Metadata {
-			cloned.Metadata[key] = value
-		}
+		maps.Copy(cloned.Metadata, req.Metadata)
 	}
 	if req.StreamOptions != nil {
 		streamOptions := *req.StreamOptions
@@ -89,9 +88,7 @@ func cloneToolMaps(tools []map[string]any) []map[string]any {
 			continue
 		}
 		cloned[i] = make(map[string]any, len(tool))
-		for key, value := range tool {
-			cloned[i][key] = value
-		}
+		maps.Copy(cloned[i], tool)
 	}
 	return cloned
 }

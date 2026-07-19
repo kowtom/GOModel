@@ -9,6 +9,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 	"time"
+
+	"github.com/enterpilot/gomodel/internal/storage"
 )
 
 // clearProviderEnvVars unsets all known provider-related environment variables.
@@ -22,6 +24,7 @@ func clearProviderEnvVars(t *testing.T) {
 		"XAI_API_KEY", "XAI_BASE_URL", "XAI_MODELS",
 		"GROQ_API_KEY", "GROQ_BASE_URL", "GROQ_MODELS",
 		"OPENROUTER_API_KEY", "OPENROUTER_BASE_URL", "OPENROUTER_MODELS", "OPENROUTER_SITE_URL", "OPENROUTER_APP_NAME",
+		"KILO_API_KEY", "KILO_BASE_URL", "KILO_MODELS",
 		"ZAI_API_KEY", "ZAI_BASE_URL", "ZAI_MODELS",
 		"AZURE_API_KEY", "AZURE_BASE_URL", "AZURE_API_VERSION", "AZURE_MODELS",
 		"ORACLE_API_KEY", "ORACLE_BASE_URL", "ORACLE_MODELS",
@@ -37,6 +40,7 @@ func clearProviderEnvVars(t *testing.T) {
 func clearAllConfigEnvVars(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
+		"CONFIG_STRICT",
 		"PORT", "BASE_PATH", "GOMODEL_MASTER_KEY", "BODY_SIZE_LIMIT", "SWAGGER_ENABLED", "PPROF_ENABLED", "ENABLE_PASSTHROUGH_ROUTES", "ALLOW_PASSTHROUGH_V1_ALIAS", "USER_PATH_HEADER", "ENABLED_PASSTHROUGH_PROVIDERS",
 		"GOMODEL_CACHE_DIR", "CACHE_REFRESH_INTERVAL",
 		"REDIS_URL", "REDIS_KEY_MODELS", "REDIS_KEY_RESPONSES", "REDIS_TTL_MODELS", "REDIS_TTL_RESPONSES",
@@ -58,6 +62,7 @@ func clearAllConfigEnvVars(t *testing.T) {
 		"USAGE_PRICING_RECALCULATION_ENABLED",
 		"USAGE_BUFFER_SIZE", "USAGE_FLUSH_INTERVAL", "USAGE_RETENTION_DAYS",
 		"BUDGETS_ENABLED",
+		"RATE_LIMITS_ENABLED",
 		"DASHBOARD_LIVE_LOGS_ENABLED", "DASHBOARD_LIVE_LOGS_BUFFER_SIZE",
 		"DASHBOARD_LIVE_LOGS_REPLAY_LIMIT", "DASHBOARD_LIVE_LOGS_HEARTBEAT_SECONDS",
 		"GUARDRAILS_ENABLED", "ENABLE_GUARDRAILS_FOR_BATCH_PROCESSING",
@@ -71,7 +76,7 @@ func clearAllConfigEnvVars(t *testing.T) {
 	}
 	for _, item := range os.Environ() {
 		key, _, _ := strings.Cut(item, "=")
-		if strings.HasPrefix(key, "SET_BUDGET_") || strings.HasPrefix(key, "TAGGING_HEADER_") {
+		if strings.HasPrefix(key, "SET_BUDGET_") || strings.HasPrefix(key, "SET_RATE_LIMIT_") || strings.HasPrefix(key, "SET_PROVIDER_RATE_LIMIT_") || strings.HasPrefix(key, "TAGGING_HEADER_") {
 			t.Setenv(key, "")
 			os.Unsetenv(key)
 		}
@@ -118,7 +123,7 @@ func TestBuildDefaultConfig(t *testing.T) {
 	if !cfg.Server.AllowPassthroughV1Alias {
 		t.Error("expected Server.AllowPassthroughV1Alias=true")
 	}
-	if got, want := cfg.Server.EnabledPassthroughProviders, []string{"openai", "anthropic", "openrouter", "zai", "vllm", "deepseek"}; !reflect.DeepEqual(got, want) {
+	if got, want := cfg.Server.EnabledPassthroughProviders, []string{"openai", "anthropic", "openrouter", "kilo", "zai", "vllm", "deepseek"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("expected Server.EnabledPassthroughProviders=%v, got %v", want, got)
 	}
 	if cfg.Models.ConfiguredProviderModelsMode != ConfiguredProviderModelsModeFallback {
@@ -133,8 +138,8 @@ func TestBuildDefaultConfig(t *testing.T) {
 	if cfg.Storage.Type != "sqlite" {
 		t.Errorf("expected Storage.Type=sqlite, got %s", cfg.Storage.Type)
 	}
-	if cfg.Storage.SQLite.Path != "data/gomodel.db" {
-		t.Errorf("expected Storage.SQLite.Path=data/gomodel.db, got %s", cfg.Storage.SQLite.Path)
+	if cfg.Storage.SQLite.Path != storage.DefaultSQLitePath() {
+		t.Errorf("expected Storage.SQLite.Path=%s, got %s", storage.DefaultSQLitePath(), cfg.Storage.SQLite.Path)
 	}
 	if cfg.Storage.PostgreSQL.MaxConns != 10 {
 		t.Errorf("expected Storage.PostgreSQL.MaxConns=10, got %d", cfg.Storage.PostgreSQL.MaxConns)
@@ -160,8 +165,8 @@ func TestBuildDefaultConfig(t *testing.T) {
 	if !cfg.Logging.OnlyModelInteractions {
 		t.Error("expected Logging.OnlyModelInteractions=true")
 	}
-	if cfg.Logging.Enabled {
-		t.Error("expected Logging.Enabled=false")
+	if !cfg.Logging.Enabled {
+		t.Error("expected Logging.Enabled=true")
 	}
 	if !cfg.Usage.Enabled {
 		t.Error("expected Usage.Enabled=true")
@@ -300,8 +305,8 @@ func TestBudgetEnvPathUsesDoubleUnderscoreSeparator(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := budgetEnvPath(tt.suffix); got != tt.want {
-				t.Fatalf("budgetEnvPath(%q) = %q, want %q", tt.suffix, got, tt.want)
+			if got := userPathEnvSuffixPath(tt.suffix); got != tt.want {
+				t.Fatalf("userPathEnvSuffixPath(%q) = %q, want %q", tt.suffix, got, tt.want)
 			}
 		})
 	}
@@ -1126,7 +1131,7 @@ func TestLoad_ConfigExample_UsesNestedModelCacheSettings(t *testing.T) {
 			t.Fatalf("expected Cache.Model.Redis to be nil in example config, got %+v", result.Config.Cache.Model.Redis)
 		}
 		gotProviders := result.Config.Server.EnabledPassthroughProviders
-		wantProviders := []string{"openai", "anthropic", "openrouter", "zai", "vllm", "deepseek", "bailian"}
+		wantProviders := []string{"openai", "anthropic", "openrouter", "kilo", "zai", "vllm", "deepseek", "bailian"}
 		if !reflect.DeepEqual(gotProviders, wantProviders) {
 			t.Fatalf("Server.EnabledPassthroughProviders = %v, want %v", gotProviders, wantProviders)
 		}

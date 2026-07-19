@@ -24,11 +24,13 @@ func (h *Handler) RegisterRoutes(g RouteRegistrar) {
 	g.GET("/usage/daily", h.DailyUsage)
 	g.GET("/usage/models", h.UsageByModel)
 	g.GET("/usage/user-paths", h.UsageByUserPath)
+	g.GET("/usage/labels", h.UsageByLabel)
 	g.GET("/usage/log", h.UsageLog)
 	g.GET("/usage/throughput", h.TokenThroughput)
 	g.POST("/usage/recalculate-pricing", h.RecalculateUsagePricing)
 
 	g.GET("/audit/log", h.AuditLog)
+	g.GET("/audit/stats", h.AuditStats)
 	g.GET("/audit/detail", h.AuditLogDetail)
 	g.GET("/audit/conversation", h.AuditConversation)
 
@@ -43,6 +45,12 @@ func (h *Handler) RegisterRoutes(g RouteRegistrar) {
 	g.POST("/budgets/reset-one", h.ResetBudget)
 	g.POST("/budgets/reset", h.ResetBudgets)
 
+	g.GET("/rate-limits", h.ListRateLimits)
+	g.PUT("/rate-limits", h.UpsertRateLimit)
+	g.DELETE("/rate-limits", h.DeleteRateLimit)
+	g.POST("/rate-limits/reset-one", h.ResetRateLimit)
+	g.POST("/rate-limits/reset", h.ResetRateLimits)
+
 	g.GET("/tagging/settings", h.TaggingSettings)
 	g.PUT("/tagging/settings", h.UpdateTaggingSettings)
 
@@ -52,6 +60,12 @@ func (h *Handler) RegisterRoutes(g RouteRegistrar) {
 	g.GET("/virtual-models", h.ListVirtualModels)
 	g.PUT("/virtual-models", h.UpsertVirtualModel)
 	g.DELETE("/virtual-models", h.DeleteVirtualModel)
+
+	g.GET("/mcp-servers", h.ListMCPServers)
+	g.PUT("/mcp-servers", h.UpsertMCPServer)
+	g.DELETE("/mcp-servers/:name", h.DeleteMCPServer)
+	g.POST("/mcp-servers/:name/reconnect", h.ReconnectMCPServer)
+	g.GET("/mcp-servers/:name/catalog", h.MCPServerCatalog)
 
 	g.GET("/failover", h.ListFailoverRules)
 	g.PUT("/failover", h.UpsertFailoverRule)
@@ -65,6 +79,7 @@ func (h *Handler) RegisterRoutes(g RouteRegistrar) {
 
 	g.GET("/auth-keys", h.ListAuthKeys)
 	g.POST("/auth-keys", h.CreateAuthKey)
+	g.PUT("/auth-keys/:id/labels", h.UpdateAuthKeyLabels)
 	g.POST("/auth-keys/:id/deactivate", h.DeactivateAuthKey)
 
 	g.GET("/guardrails/types", h.ListGuardrailTypes)

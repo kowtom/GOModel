@@ -6,10 +6,10 @@ import (
 	"net/url"
 	"strings"
 
-	"gomodel/internal/core"
-	"gomodel/internal/llmclient"
-	"gomodel/internal/providers"
-	"gomodel/internal/providers/openai"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/llmclient"
+	"github.com/enterpilot/gomodel/internal/providers"
+	"github.com/enterpilot/gomodel/internal/providers/openai"
 )
 
 const defaultAPIVersion = "2024-10-21"
@@ -29,13 +29,14 @@ type Provider struct {
 	resourceProvider       *openai.CompatibleProvider
 	openAIResourceProvider *openai.CompatibleProvider
 	apiVersion             string
-	apiKey                 string // retained to inject the api-key header on the realtime target
+	keys                   *providers.Keyring // retained to inject the api-key header on the realtime target
 }
 
 func New(providerCfg providers.ProviderConfig, opts providers.ProviderOptions) core.Provider {
 	baseURL := providers.ResolveBaseURL(providerCfg.BaseURL, "https://example.invalid")
 	apiVersion := providers.ResolveAPIVersion(providerCfg.APIVersion, defaultAPIVersion)
-	p := &Provider{apiVersion: apiVersion, apiKey: providerCfg.APIKey}
+	// All three clients share opts.Keys, so the rotation is even across them.
+	p := &Provider{apiVersion: apiVersion, keys: opts.Keyring(providerCfg.APIKey)}
 	clientCfg := openai.CompatibleProviderConfig{
 		ProviderName: "azure",
 		BaseURL:      baseURL,
@@ -52,7 +53,7 @@ func New(providerCfg providers.ProviderConfig, opts providers.ProviderOptions) c
 }
 
 func NewWithHTTPClient(apiKey string, httpClient *http.Client, hooks llmclient.Hooks) *Provider {
-	p := &Provider{apiVersion: defaultAPIVersion, apiKey: apiKey}
+	p := &Provider{apiVersion: defaultAPIVersion, keys: providers.NewKeyring(apiKey)}
 	cfg := openai.CompatibleProviderConfig{
 		ProviderName: "azure",
 		BaseURL:      "https://example.invalid",
@@ -165,20 +166,8 @@ func setHeaders(req *http.Request, apiKey string) {
 	providers.SetAuthHeaders(req, apiKey, providers.AuthHeaderConfig{
 		AuthHeader:        "api-key",
 		RequestIDHeader:   "X-Client-Request-Id",
-		ValidateRequestID: isValidClientRequestID,
+		ValidateRequestID: providers.IsValidClientRequestID,
 	})
-}
-
-func isValidClientRequestID(id string) bool {
-	if len(id) > 512 {
-		return false
-	}
-	for i := 0; i < len(id); i++ {
-		if id[i] > 127 {
-			return false
-		}
-	}
-	return true
 }
 
 func resourceRootBaseURL(baseURL string) string {

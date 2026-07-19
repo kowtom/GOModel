@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -17,9 +16,8 @@ import (
 	"github.com/labstack/echo/v5"
 	"github.com/tidwall/gjson"
 
-	"gomodel/internal/auditlog"
-	"gomodel/internal/cache"
-	"gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/cache"
+	"github.com/enterpilot/gomodel/internal/core"
 )
 
 var cacheablePaths = map[string]bool{
@@ -44,14 +42,14 @@ type simpleCacheMiddleware struct {
 	wg    sync.WaitGroup
 	jobs  chan cacheWriteJob
 
-	hitRecorder func(*echo.Context, []byte, string)
+	hitRecorder func(exchange, []byte, string)
 
 	workers sync.WaitGroup
 	mu      sync.RWMutex
 	closed  bool
 }
 
-func newSimpleCacheMiddleware(store cache.Store, ttl time.Duration, hitRecorder func(*echo.Context, []byte, string)) *simpleCacheMiddleware {
+func newSimpleCacheMiddleware(store cache.Store, ttl time.Duration, hitRecorder func(exchange, []byte, string)) *simpleCacheMiddleware {
 	m := &simpleCacheMiddleware{
 		store:       store,
 		ttl:         ttl,
@@ -62,64 +60,31 @@ func newSimpleCacheMiddleware(store cache.Store, ttl time.Duration, hitRecorder 
 	return m
 }
 
-func (m *simpleCacheMiddleware) Middleware() echo.MiddlewareFunc {
-	return func(next echo.HandlerFunc) echo.HandlerFunc {
-		return func(c *echo.Context) error {
-			if m.store == nil {
-				return next(c)
-			}
-			path := c.Request().URL.Path
-			if !cacheablePaths[path] || c.Request().Method != http.MethodPost {
-				return next(c)
-			}
-			if shouldSkipCache(c.Request()) {
-				return next(c)
-			}
-			body, cacheable, err := requestBodyForCache(c.Request())
-			if err != nil {
-				return core.NewInvalidRequestError(err.Error(), err)
-			}
-			if !cacheable {
-				return next(c)
-			}
-			plan := core.GetWorkflow(c.Request().Context())
-			if shouldSkipCacheForWorkflow(plan) {
-				return next(c)
-			}
-			hit, err := m.TryHit(c, body)
-			if err != nil || hit {
-				return err
-			}
-			return m.StoreAfter(c, body, func() error { return next(c) })
-		}
-	}
-}
-
-// TryHit checks the exact-match cache. Returns (true, nil) and writes the cached
-// response if found. Returns (false, nil) on a miss.
-func (m *simpleCacheMiddleware) TryHit(c *echo.Context, body []byte) (bool, error) {
+// TryHit checks the exact-match cache. Returns (true, nil) and replays the
+// cached response if found. Returns (false, nil) on a miss.
+func (m *simpleCacheMiddleware) TryHit(ex exchange, body []byte) (bool, error) {
 	if m == nil || m.store == nil {
 		return false, nil
 	}
-	path := c.Request().URL.Path
-	plan := core.GetWorkflow(c.Request().Context())
+	path := ex.Path()
+	plan := core.GetWorkflow(ex.Context())
 	key := hashRequest(path, body, plan)
-	cached, err := m.store.Get(c.Request().Context(), key)
+	cached, err := m.store.Get(ex.Context(), key)
 	if err != nil {
 		return false, nil
 	}
 	if len(cached) > 0 {
-		if err := writeCachedResponse(c, path, body, cached, CacheTypeExact); err != nil {
+		if err := ex.ReplayHit(body, cached, CacheTypeExact); err != nil {
 			slog.Warn("response cache replay failed", "path", path, "cache_type", CacheTypeExact, "err", err)
 			return false, nil
 		}
-		auditlog.EnrichEntryWithCacheType(c, CacheTypeExact)
+		ex.MarkHit(CacheTypeExact)
 		if m.hitRecorder != nil {
-			m.hitRecorder(c, cached, CacheTypeExact)
+			m.hitRecorder(ex, cached, CacheTypeExact)
 		}
 		slog.Info("response cache hit (exact)",
 			"path", path,
-			"request_id", c.Request().Header.Get("X-Request-ID"),
+			"request_id", ex.RequestHeader("X-Request-ID"),
 		)
 		return true, nil
 	}
@@ -128,20 +93,15 @@ func (m *simpleCacheMiddleware) TryHit(c *echo.Context, body []byte) (bool, erro
 
 // StoreAfter calls next, captures the response, and asynchronously stores it on
 // a cacheable success response.
-func (m *simpleCacheMiddleware) StoreAfter(c *echo.Context, body []byte, next func() error) error {
+func (m *simpleCacheMiddleware) StoreAfter(ex exchange, body []byte, next func() error) error {
 	if m == nil || m.store == nil {
 		return next()
 	}
-	path := c.Request().URL.Path
-	plan := core.GetWorkflow(c.Request().Context())
+	path := ex.Path()
+	plan := core.GetWorkflow(ex.Context())
 	key := hashRequest(path, body, plan)
 
-	data, ok, err := captureResponseForCache(
-		c,
-		path,
-		"response cache: failed to capture cacheable response body",
-		next,
-	)
+	data, ok, err := ex.Capture("response cache: failed to capture cacheable response body", next)
 	if err != nil {
 		return err
 	}
@@ -201,42 +161,7 @@ func (m *simpleCacheMiddleware) enqueueWrite(job cacheWriteJob) {
 	}
 }
 
-func shouldSkipCacheForWorkflow(plan *core.Workflow) bool {
-	if plan == nil {
-		return true
-	}
-	if !plan.CacheEnabled() {
-		return true
-	}
-	return plan.Mode == core.ExecutionModeTranslated && plan.Resolution == nil
-}
-
-func requestBodyForCache(req *http.Request) ([]byte, bool, error) {
-	if snapshot := core.GetRequestSnapshot(req.Context()); snapshot != nil {
-		if snapshot.BodyNotCaptured {
-			return nil, false, nil
-		}
-		if body := snapshot.CapturedBodyView(); body != nil {
-			return body, true, nil
-		}
-	}
-	if req.Body == nil {
-		return []byte{}, true, nil
-	}
-
-	body, err := io.ReadAll(req.Body)
-	if err != nil {
-		return nil, false, err
-	}
-	if body == nil {
-		body = []byte{}
-	}
-	req.Body = io.NopCloser(bytes.NewReader(body))
-	return body, true, nil
-}
-
-func shouldSkipCache(req *http.Request) bool {
-	cc := req.Header.Get("Cache-Control")
+func shouldSkipCacheControl(cc string) bool {
 	if cc == "" {
 		return false
 	}
@@ -294,8 +219,15 @@ func (r *responseCapture) cachedBody(contentType string) ([]byte, bool) {
 	if r == nil || r.body == nil || r.body.Len() == 0 {
 		return nil, false
 	}
+	return cacheableResponseBody(bytes.Clone(r.body.Bytes()), contentType)
+}
 
-	raw := bytes.Clone(r.body.Bytes())
+// cacheableResponseBody validates that raw is storable: well-formed SSE for
+// event streams, valid JSON otherwise.
+func cacheableResponseBody(raw []byte, contentType string) ([]byte, bool) {
+	if len(raw) == 0 {
+		return nil, false
+	}
 	if isEventStreamContentType(contentType) {
 		if !validateCacheableSSE(raw) {
 			return nil, false

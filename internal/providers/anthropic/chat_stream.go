@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"gomodel/internal/core"
-	"gomodel/internal/llmclient"
-	"gomodel/internal/providers"
-	"gomodel/internal/streaming"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/llmclient"
+	"github.com/enterpilot/gomodel/internal/providers"
+	"github.com/enterpilot/gomodel/internal/streaming"
 )
 
 // StreamChatCompletion returns a raw response body for streaming (caller must close)
@@ -52,10 +52,12 @@ type streamConverter struct {
 	emittedToolCalls  bool
 }
 
+// streamToolCallState tracks per-tool-call bookkeeping for the chat dialect.
+// Unlike the Responses converter, the chat path relays argument deltas
+// verbatim and never needs the accumulated argument text, so none is kept.
 type streamToolCallState struct {
 	ID                string
 	Name              string
-	Arguments         strings.Builder
 	Index             int
 	Started           bool
 	PlaceholderObject bool
@@ -204,9 +206,6 @@ func (sc *streamConverter) convertEvent(event *anthropicStreamEvent) string {
 				sc.toolCalls[event.Index] = state
 				return ""
 			}
-			if initialArguments != "" {
-				_, _ = state.Arguments.WriteString(initialArguments)
-			}
 			state.Started = true
 			sc.toolCalls[event.Index] = state
 			sc.emittedToolCalls = true
@@ -257,11 +256,7 @@ func (sc *streamConverter) convertEvent(event *anthropicStreamEvent) string {
 			if state == nil {
 				return ""
 			}
-			if state.PlaceholderObject {
-				state.Arguments = strings.Builder{}
-				state.PlaceholderObject = false
-			}
-			_, _ = state.Arguments.WriteString(event.Delta.PartialJSON)
+			state.PlaceholderObject = false
 			if !state.Started {
 				state.Started = true
 				sc.emittedToolCalls = true
@@ -320,14 +315,20 @@ func (sc *streamConverter) convertEvent(event *anthropicStreamEvent) string {
 		// Emit chunk if we have stop_reason or usage data
 		if (event.Delta != nil && event.Delta.StopReason != "") || event.Usage != nil {
 			var finishReason any
+			delta := map[string]any{}
 			if event.Delta != nil && event.Delta.StopReason != "" {
 				finishReason = sc.mapStreamStopReason(event.Delta.StopReason)
+				// Carry the matched stop sequence as a delta extension field:
+				// OpenAI's finish_reason "stop" cannot express it.
+				if event.Delta.StopSequence != "" {
+					delta["stop_sequence"] = event.Delta.StopSequence
+				}
 			}
 			var usage *anthropicUsage
 			if sc.hasUsage {
 				usage = &sc.usage
 			}
-			return sc.formatChatChunk(map[string]any{}, finishReason, usage)
+			return sc.formatChatChunk(delta, finishReason, usage)
 		}
 
 	case "message_stop":

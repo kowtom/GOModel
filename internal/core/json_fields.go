@@ -4,13 +4,43 @@ import (
 	"bytes"
 	"fmt"
 	"math"
+	"reflect"
 	"slices"
 	"sort"
+	"strings"
 
 	"github.com/goccy/go-json"
 
 	"github.com/tidwall/gjson"
 )
+
+// jsonFieldNames returns the JSON member names of v's exported struct fields,
+// honoring `json` tags and skipping "-". Known-field lists are derived from
+// the struct definitions once at package init so they cannot drift: a
+// hand-maintained list that misses a newly added typed field would preserve
+// that field as an unknown extra too, double-emitting it on marshal.
+func jsonFieldNames(v any) []string {
+	t := reflect.TypeOf(v)
+	names := make([]string, 0, t.NumField())
+	for field := range t.Fields() {
+		if !field.IsExported() {
+			continue
+		}
+		if field.Anonymous {
+			names = append(names, jsonFieldNames(reflect.New(field.Type).Elem().Interface())...)
+			continue
+		}
+		name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		if name == "-" {
+			continue
+		}
+		if name == "" {
+			name = field.Name
+		}
+		names = append(names, name)
+	}
+	return names
+}
 
 // UnknownJSONFields stores unknown JSON object members as a single raw object.
 // This avoids allocating a map for every decoded chat-family request while
@@ -241,7 +271,12 @@ func extractUnknownJSONFields(data []byte, knownFields ...string) (UnknownJSONFi
 		return UnknownJSONFields{}, fmt.Errorf("expected JSON object")
 	}
 
-	buf := bytes.NewBuffer(make([]byte, 0, len(data)))
+	// Pre-size for typical unknown-field payloads without reserving
+	// request-sized capacity: the result is retained on the decoded request
+	// for its whole lifetime, so a body-sized backing array would pin a full
+	// body copy per decoded object even when the extras are a few bytes.
+	var buf bytes.Buffer
+	buf.Grow(min(len(data), 256))
 	buf.WriteByte('{')
 	wrote := false
 	root.ForEach(func(key, value gjson.Result) bool {
@@ -262,7 +297,13 @@ func extractUnknownJSONFields(data []byte, knownFields ...string) (UnknownJSONFi
 	}
 
 	buf.WriteByte('}')
-	return UnknownJSONFields{raw: buf.Bytes()}, nil
+	raw := buf.Bytes()
+	// Re-copy only when the buffer over-grew, so the retained extras never
+	// pin significantly more capacity than their own length.
+	if cap(raw)-len(raw) > 1024 {
+		raw = bytes.Clone(raw)
+	}
+	return UnknownJSONFields{raw: raw}, nil
 }
 
 func marshalWithUnknownJSONFields(base any, extraFields UnknownJSONFields) ([]byte, error) {

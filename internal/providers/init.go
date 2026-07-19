@@ -4,16 +4,18 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sort"
 	"sync"
 	"time"
 
-	"gomodel/config"
-	"gomodel/internal/cache"
-	"gomodel/internal/cache/modelcache"
-	"gomodel/internal/core"
-	"gomodel/internal/modeldata"
+	"github.com/enterpilot/gomodel/config"
+	"github.com/enterpilot/gomodel/internal/cache"
+	"github.com/enterpilot/gomodel/internal/cache/modelcache"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/modeldata"
+	"github.com/enterpilot/gomodel/internal/platformdir"
 )
 
 // InitResult holds the initialized provider infrastructure and cleanup functions.
@@ -81,6 +83,17 @@ func Init(ctx context.Context, result *config.LoadResult, factory *ProviderFacto
 	}
 
 	providerMap, credentialResolved := resolveProviders(result.RawProviders, result.Config.Resilience, factory.discoveryConfigsSnapshot())
+	fromFile, fromEnv := providerOrigins(result.RawProviders, providerMap)
+	slog.Info("providers resolved",
+		"total", len(providerMap),
+		"from_config_file", len(fromFile),
+		"from_env", len(fromEnv),
+		"config_file_providers", fromFile,
+		"env_providers", fromEnv)
+	if skipped := skippedProviderNames(result.RawProviders, credentialResolved); len(skipped) > 0 {
+		slog.Info("configured providers skipped: credentials or base_url did not resolve",
+			"providers", skipped)
+	}
 
 	modelCache, err := initCache(result.Config)
 	if err != nil {
@@ -145,7 +158,8 @@ func Init(ctx context.Context, result *config.LoadResult, factory *ProviderFacto
 	if refreshInterval <= 0 {
 		refreshInterval = time.Hour
 	}
-	stopRefresh := registry.StartBackgroundRefresh(refreshInterval, modelListURL)
+	recheckInterval := time.Duration(result.Config.Cache.Model.RecheckInterval) * time.Second
+	stopRefresh := registry.StartBackgroundRefresh(refreshInterval, recheckInterval, modelListURL)
 
 	router, err := NewRouter(registry)
 	if err != nil {
@@ -192,13 +206,27 @@ func initCache(cfg *config.Config) (modelcache.Cache, error) {
 	if m.Local != nil {
 		cacheDir := m.Local.CacheDir
 		if cacheDir == "" {
-			cacheDir = ".cache"
+			cacheDir = defaultModelCacheDir()
 		}
 		cacheFile := filepath.Join(cacheDir, "models.json")
 		slog.Info("using local file cache", "path", cacheFile)
 		return modelcache.NewLocalCache(cacheFile), nil
 	}
 	return nil, fmt.Errorf("cache.model: must have either local or redis configured")
+}
+
+// defaultModelCacheDir keeps the historical ./.cache location whenever it
+// already exists (existing deployments, the Docker image); fresh binary
+// installs get the OS-conventional per-user cache directory instead.
+func defaultModelCacheDir() string {
+	if info, err := os.Stat(".cache"); err == nil && info.IsDir() {
+		return ".cache"
+	}
+	dir, err := platformdir.CacheDir()
+	if err != nil {
+		return ".cache"
+	}
+	return dir
 }
 
 // initializeProviders instantiates and registers all resolved providers.

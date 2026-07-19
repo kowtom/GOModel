@@ -1,7 +1,7 @@
 package usage
 
 import (
-	"gomodel/internal/storage/sqlutil"
+	"github.com/enterpilot/gomodel/internal/storage/sqlutil"
 
 	"context"
 	"database/sql"
@@ -35,13 +35,15 @@ func (r *SQLiteReader) GetSummary(ctx context.Context, params UsageQueryParams) 
 	where := sqlutil.BuildWhereClause(conditions)
 
 	costCols := `, SUM(input_cost), SUM(output_cost), SUM(total_cost)`
-	query := `SELECT COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(total_tokens), 0)` + costCols + `
+	savingsCols := `, COALESCE(SUM(rewrite_tokens_saved), 0), SUM(rewrite_cost_saved)`
+	query := `SELECT COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(total_tokens), 0)` + costCols + savingsCols + `
 			FROM usage` + where
 
 	summary := &UsageSummary{}
 	err = r.db.QueryRowContext(ctx, query, args...).Scan(
 		&summary.TotalRequests, &summary.TotalInput, &summary.TotalOutput, &summary.TotalTokens,
 		&summary.TotalInputCost, &summary.TotalOutputCost, &summary.TotalCost,
+		&summary.RewriteTokensSaved, &summary.RewriteCostSaved,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query usage summary: %w", err)
@@ -105,8 +107,10 @@ func (r *SQLiteReader) GetUsageByModel(ctx context.Context, params UsageQueryPar
 
 // GetUsageByUserPath returns token and cost totals grouped by tracked user path.
 func (r *SQLiteReader) GetUsageByUserPath(ctx context.Context, params UsageQueryParams) ([]UserPathUsage, error) {
+	// Match the user-path filter against the same grouped (root-normalized)
+	// expression the rows are grouped by.
 	userPathExpr := usageGroupedUserPathSQL("user_path")
-	conditions, args, err := sqliteUsageByUserPathConditions(params, userPathExpr)
+	conditions, args, err := sqliteUsageConditionsWithUserPathExpr(params, userPathExpr)
 	if err != nil {
 		return nil, err
 	}
@@ -138,6 +142,43 @@ func (r *SQLiteReader) GetUsageByUserPath(ctx context.Context, params UsageQuery
 	return result, nil
 }
 
+// GetUsageByLabel returns token and cost totals grouped by request label.
+// json_each expands each row's labels JSON array, so a row with several
+// labels contributes its totals to each of them; unlabelled rows are omitted.
+func (r *SQLiteReader) GetUsageByLabel(ctx context.Context, params UsageQueryParams) ([]LabelUsage, error) {
+	conditions, args, err := sqliteUsageConditions(params)
+	if err != nil {
+		return nil, err
+	}
+	conditions = append(conditions, "labels IS NOT NULL")
+	where := sqlutil.BuildWhereClause(conditions)
+
+	costCols := `, SUM(input_cost), SUM(output_cost), SUM(total_cost)`
+	query := `SELECT labels_each.value AS label, COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(total_tokens), 0)` + costCols + `
+			FROM usage, json_each(usage.labels) AS labels_each` + where + ` GROUP BY labels_each.value ORDER BY label`
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query usage by label: %w", err)
+	}
+	defer rows.Close()
+
+	result := make([]LabelUsage, 0)
+	for rows.Next() {
+		var l LabelUsage
+		if err := rows.Scan(&l.Label, &l.Requests, &l.InputTokens, &l.OutputTokens, &l.TotalTokens, &l.InputCost, &l.OutputCost, &l.TotalCost); err != nil {
+			return nil, fmt.Errorf("failed to scan usage by label row: %w", err)
+		}
+		result = append(result, l)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating usage by label rows: %w", err)
+	}
+
+	return result, nil
+}
+
 // GetUsageLog returns a paginated list of individual usage log entries.
 func (r *SQLiteReader) GetUsageLog(ctx context.Context, params UsageLogParams) (*UsageLogResult, error) {
 	limit, offset := clampLimitOffset(params.Limit, params.Offset)
@@ -147,14 +188,6 @@ func (r *SQLiteReader) GetUsageLog(ctx context.Context, params UsageLogParams) (
 		return nil, err
 	}
 
-	if params.Model != "" {
-		conditions = append(conditions, "model = ?")
-		args = append(args, params.Model)
-	}
-	if params.Provider != "" {
-		conditions = append(conditions, "(provider = ? OR provider_name = ?)")
-		args = append(args, params.Provider, params.Provider)
-	}
 	if params.Search != "" {
 		conditions = append(conditions, "(model LIKE ? ESCAPE '\\' OR provider LIKE ? ESCAPE '\\' OR provider_name LIKE ? ESCAPE '\\' OR request_id LIKE ? ESCAPE '\\' OR provider_id LIKE ? ESCAPE '\\')")
 		s := "%" + sqlutil.EscapeLikeWildcards(params.Search) + "%"
@@ -172,7 +205,8 @@ func (r *SQLiteReader) GetUsageLog(ctx context.Context, params UsageLogParams) (
 
 	// Fetch page
 	dataQuery := `SELECT id, request_id, provider_id, timestamp, model, provider, provider_name, endpoint, user_path, cache_type, labels,
-		input_tokens, output_tokens, total_tokens, input_cost, output_cost, total_cost, COALESCE(cost_source, ''), raw_data, COALESCE(costs_calculation_caveat, '')
+		input_tokens, output_tokens, total_tokens, input_cost, output_cost, total_cost, COALESCE(cost_source, ''), raw_data, COALESCE(costs_calculation_caveat, ''),
+		COALESCE(rewrite_tokens_saved, 0), rewrite_cost_saved
 		FROM usage` + where + ` ORDER BY ` + sqliteTimestampEpochExpr() + ` DESC, id DESC LIMIT ? OFFSET ?`
 	dataArgs := append(append([]any(nil), args...), limit, offset)
 
@@ -213,7 +247,8 @@ func (r *SQLiteReader) GetUsageByRequestIDs(ctx context.Context, requestIDs []st
 	}
 
 	query := `SELECT id, request_id, provider_id, timestamp, model, provider, provider_name, endpoint, user_path, cache_type, labels,
-		input_tokens, output_tokens, total_tokens, input_cost, output_cost, total_cost, COALESCE(cost_source, ''), raw_data, COALESCE(costs_calculation_caveat, '')
+		input_tokens, output_tokens, total_tokens, input_cost, output_cost, total_cost, COALESCE(cost_source, ''), raw_data, COALESCE(costs_calculation_caveat, ''),
+		COALESCE(rewrite_tokens_saved, 0), rewrite_cost_saved
 		FROM usage WHERE request_id IN (` + placeholders + `) ORDER BY ` + sqliteTimestampEpochExpr() + ` DESC, id DESC`
 
 	rows, err := r.db.QueryContext(ctx, query, args...)
@@ -249,13 +284,12 @@ func scanSQLiteUsageLogEntries(rows *sql.Rows) ([]UsageLogEntry, error) {
 		var cacheType sql.NullString
 		var labelsJSON *string
 		if err := rows.Scan(&e.ID, &e.RequestID, &e.ProviderID, &ts, &e.Model, &e.Provider, &providerName, &e.Endpoint, &userPath, &cacheType, &labelsJSON,
-			&e.InputTokens, &e.OutputTokens, &e.TotalTokens, &e.InputCost, &e.OutputCost, &e.TotalCost, &e.CostSource, &rawDataJSON, &caveat); err != nil {
+			&e.InputTokens, &e.OutputTokens, &e.TotalTokens, &e.InputCost, &e.OutputCost, &e.TotalCost, &e.CostSource, &rawDataJSON, &caveat,
+			&e.RewriteTokensSaved, &e.RewriteCostSaved); err != nil {
 			return nil, fmt.Errorf("failed to scan usage log row: %w", err)
 		}
-		if labelsJSON != nil && *labelsJSON != "" {
-			if err := json.Unmarshal([]byte(*labelsJSON), &e.Labels); err != nil {
-				slog.Warn("failed to unmarshal labels JSON", "request_id", e.RequestID, "error", err)
-			}
+		if labelsJSON != nil {
+			e.Labels = sqlutil.StringsFromJSON(*labelsJSON, e.RequestID)
 		}
 		if t, ok := sqlutil.ParseSQLiteTimestamp(ts); ok {
 			e.Timestamp = t
@@ -511,22 +545,10 @@ func sqliteOffsetModifier(offsetMinutes int) string {
 }
 
 func sqliteUsageConditions(params UsageQueryParams) ([]string, []any, error) {
-	conditions, args := sqliteDateRangeConditions(params)
-	userPath, err := normalizeUsageUserPathFilter(params.UserPath)
-	if err != nil {
-		return nil, nil, err
-	}
-	if userPath != "" {
-		conditions = append(conditions, "(user_path = ? OR user_path LIKE ? ESCAPE '\\')")
-		args = append(args, userPath, usageUserPathSubtreePattern(userPath))
-	}
-	if condition := sqliteCacheModeCondition(params.CacheMode); condition != "" {
-		conditions = append(conditions, condition)
-	}
-	return conditions, args, nil
+	return sqliteUsageConditionsWithUserPathExpr(params, "user_path")
 }
 
-func sqliteUsageByUserPathConditions(params UsageQueryParams, userPathExpr string) ([]string, []any, error) {
+func sqliteUsageConditionsWithUserPathExpr(params UsageQueryParams, userPathExpr string) ([]string, []any, error) {
 	conditions, args := sqliteDateRangeConditions(params)
 	userPath, err := normalizeUsageUserPathFilter(params.UserPath)
 	if err != nil {
@@ -535,6 +557,18 @@ func sqliteUsageByUserPathConditions(params UsageQueryParams, userPathExpr strin
 	if userPath != "" {
 		conditions = append(conditions, "("+userPathExpr+" = ? OR "+userPathExpr+" LIKE ? ESCAPE '\\')")
 		args = append(args, userPath, usageUserPathSubtreePattern(userPath))
+	}
+	if params.Model != "" {
+		conditions = append(conditions, "model = ?")
+		args = append(args, params.Model)
+	}
+	if params.Provider != "" {
+		conditions = append(conditions, "(provider = ? OR provider_name = ?)")
+		args = append(args, params.Provider, params.Provider)
+	}
+	if params.Label != "" {
+		conditions = append(conditions, "(labels IS NOT NULL AND EXISTS (SELECT 1 FROM json_each(usage.labels) WHERE json_each.value = ?))")
+		args = append(args, params.Label)
 	}
 	if condition := sqliteCacheModeCondition(params.CacheMode); condition != "" {
 		conditions = append(conditions, condition)

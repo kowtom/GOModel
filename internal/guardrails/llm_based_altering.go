@@ -8,7 +8,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	"gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/core"
 )
 
 const (
@@ -436,8 +436,6 @@ func (g *LLMBasedAlteringGuardrail) rewriteTexts(ctx context.Context, texts []st
 	group.SetLimit(maxConcurrentRewrites)
 
 	for i, text := range texts {
-		i := i
-		text := text
 		group.Go(func() error {
 			result, err := g.rewriteText(groupCtx, text)
 			if err != nil {

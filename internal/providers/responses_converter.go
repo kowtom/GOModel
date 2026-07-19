@@ -12,7 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"gomodel/internal/streaming"
+	"github.com/enterpilot/gomodel/internal/streaming"
 )
 
 // OpenAIResponsesStreamConverter wraps an OpenAI-compatible SSE stream
@@ -394,8 +394,7 @@ func (sc *OpenAIResponsesStreamConverter) Read(p []byte) (n int, err error) {
 				continue
 			}
 
-			if after, ok := bytes.CutPrefix(line, []byte("data: ")); ok {
-				data := after
+			if data, ok := bytes.CutPrefix(line, []byte("data: ")); ok {
 				if bytes.Equal(data, []byte("[DONE]")) {
 					sc.appendCompletedEvents()
 					continue

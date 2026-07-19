@@ -4,13 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"gomodel/internal/core"
-	"gomodel/internal/guardrails"
+	"github.com/enterpilot/gomodel/internal/core"
+	"github.com/enterpilot/gomodel/internal/guardrails"
 )
 
 type staticStore struct {
@@ -361,7 +362,7 @@ func TestServiceMatch_MostSpecificWins(t *testing.T) {
 		},
 	}
 
-	service, err := NewService(store, NewCompiler(nil))
+	service, err := NewService(store, NewCompilerWithFeatureCaps(nil, core.DefaultWorkflowFeatures()))
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
@@ -391,9 +392,61 @@ func TestServiceMatch_MostSpecificWins(t *testing.T) {
 	assertMatch("global", core.NewWorkflowSelector("anthropic", "claude-sonnet-4"), "global")
 }
 
+func TestServiceRefresh_RejectsInvalidActiveSets(t *testing.T) {
+	activeVersion := func(id string, scope Scope) Version {
+		return Version{
+			ID:      id,
+			Scope:   scope,
+			Version: 1,
+			Active:  true,
+			Name:    id,
+			Payload: Payload{SchemaVersion: 1},
+		}
+	}
+
+	tests := []struct {
+		name     string
+		versions []Version
+		wantErr  string
+	}{
+		{
+			name: "duplicate scope",
+			versions: []Version{
+				activeVersion("global", Scope{}),
+				activeVersion("team-a", Scope{UserPath: "/team"}),
+				activeVersion("team-b", Scope{UserPath: "/team"}),
+			},
+			wantErr: `duplicate active workflows for scope "path:/team": "team-a" and "team-b"`,
+		},
+		{
+			name: "missing global",
+			versions: []Version{
+				activeVersion("team-a", Scope{UserPath: "/team"}),
+			},
+			wantErr: "missing active global workflow",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service, err := NewService(&staticStore{versions: tt.versions}, NewCompilerWithFeatureCaps(nil, core.DefaultWorkflowFeatures()))
+			if err != nil {
+				t.Fatalf("NewService() error = %v", err)
+			}
+			err = service.Refresh(context.Background())
+			if err == nil {
+				t.Fatal("Refresh() error = nil, want error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Refresh() error = %q, want it to contain %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestServiceEnsureDefaultGlobal_CreatesWhenMissing(t *testing.T) {
 	store := &staticStore{}
-	service, err := NewService(store, NewCompiler(nil))
+	service, err := NewService(store, NewCompilerWithFeatureCaps(nil, core.DefaultWorkflowFeatures()))
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
@@ -450,7 +503,7 @@ func TestServiceEnsureDefaultGlobal_ReconcilesManagedDefault(t *testing.T) {
 			},
 		},
 	}
-	service, err := NewService(store, NewCompiler(nil))
+	service, err := NewService(store, NewCompilerWithFeatureCaps(nil, core.DefaultWorkflowFeatures()))
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
@@ -506,7 +559,7 @@ func TestServiceEnsureDefaultGlobal_PreservesCustomGlobal(t *testing.T) {
 			},
 		},
 	}
-	service, err := NewService(store, NewCompiler(nil))
+	service, err := NewService(store, NewCompilerWithFeatureCaps(nil, core.DefaultWorkflowFeatures()))
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
@@ -553,7 +606,7 @@ func TestServiceEnsureDefaultGlobal_LoadsPreservedCustomGlobalIntoSnapshot(t *te
 			},
 		},
 	}
-	service, err := NewService(store, NewCompiler(nil))
+	service, err := NewService(store, NewCompilerWithFeatureCaps(nil, core.DefaultWorkflowFeatures()))
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
@@ -587,7 +640,7 @@ func TestServiceEnsureDefaultGlobal_ValidatesBeforeStoreMutation(t *testing.T) {
 	store := &concurrentStore{
 		createCalled: make(chan struct{}, 1),
 	}
-	service, err := NewService(store, &previewEmptyCompiler{delegate: NewCompiler(nil)})
+	service, err := NewService(store, &previewEmptyCompiler{delegate: NewCompilerWithFeatureCaps(nil, core.DefaultWorkflowFeatures())})
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
@@ -805,7 +858,7 @@ func TestServiceCreate_RefreshesSnapshot(t *testing.T) {
 			},
 		},
 	}
-	service, err := NewService(store, NewCompiler(nil))
+	service, err := NewService(store, NewCompilerWithFeatureCaps(nil, core.DefaultWorkflowFeatures()))
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
@@ -930,7 +983,7 @@ func TestServiceListViews_AnnotatesCompileFailuresPerRow(t *testing.T) {
 		},
 	}
 	service, err := NewService(store, &versionFailingCompiler{
-		delegate: NewCompiler(nil),
+		delegate: NewCompilerWithFeatureCaps(nil, core.DefaultWorkflowFeatures()),
 		version:  "provider-v1",
 		err:      errors.New("compile failed for provider-v1"),
 	})
@@ -1002,7 +1055,7 @@ func TestServiceDeactivate_RefreshesSnapshot(t *testing.T) {
 			},
 		},
 	}
-	service, err := NewService(store, NewCompiler(nil))
+	service, err := NewService(store, NewCompilerWithFeatureCaps(nil, core.DefaultWorkflowFeatures()))
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
@@ -1043,7 +1096,7 @@ func TestServiceDeactivate_RejectsGlobalWorkflow(t *testing.T) {
 			},
 		},
 	}
-	service, err := NewService(store, NewCompiler(nil))
+	service, err := NewService(store, NewCompilerWithFeatureCaps(nil, core.DefaultWorkflowFeatures()))
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
@@ -1089,7 +1142,7 @@ func TestServiceDeactivate_AllowsPathScopedWorkflow(t *testing.T) {
 			},
 		},
 	}
-	service, err := NewService(store, NewCompiler(nil))
+	service, err := NewService(store, NewCompilerWithFeatureCaps(nil, core.DefaultWorkflowFeatures()))
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
@@ -1124,7 +1177,7 @@ func TestServiceCreateWaitsForInFlightRefreshBeforePersisting(t *testing.T) {
 		createCalled: make(chan struct{}, 1),
 	}
 	compiler := &blockingCompiler{
-		delegate:  NewCompiler(nil),
+		delegate:  NewCompilerWithFeatureCaps(nil, core.DefaultWorkflowFeatures()),
 		blockCall: 2,
 		blocked:   make(chan struct{}),
 		release:   make(chan struct{}),
@@ -1211,7 +1264,7 @@ func TestServiceCreateRejectsEmptyCompiledPreviewBeforePersisting(t *testing.T) 
 		},
 		createCalled: make(chan struct{}, 1),
 	}
-	service, err := NewService(store, &previewEmptyCompiler{delegate: NewCompiler(nil)})
+	service, err := NewService(store, &previewEmptyCompiler{delegate: NewCompilerWithFeatureCaps(nil, core.DefaultWorkflowFeatures())})
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
@@ -1266,7 +1319,7 @@ func TestServiceCreateRefreshIgnoresRequestContextCancellationAfterPersist(t *te
 			},
 		},
 	}
-	service, err := NewService(store, NewCompiler(nil))
+	service, err := NewService(store, NewCompilerWithFeatureCaps(nil, core.DefaultWorkflowFeatures()))
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
@@ -1324,7 +1377,7 @@ func TestServiceCreateReturnsSuccessWhenReloadRefreshFailsAfterPersist(t *testin
 			},
 		},
 	}
-	service, err := NewService(store, NewCompiler(nil))
+	service, err := NewService(store, NewCompilerWithFeatureCaps(nil, core.DefaultWorkflowFeatures()))
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
@@ -1391,7 +1444,7 @@ func TestServiceDeactivateRefreshIgnoresRequestContextCancellationAfterPersist(t
 			},
 		},
 	}
-	service, err := NewService(store, NewCompiler(nil))
+	service, err := NewService(store, NewCompilerWithFeatureCaps(nil, core.DefaultWorkflowFeatures()))
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
@@ -1449,7 +1502,7 @@ func TestServiceDeactivateReturnsSuccessWhenReloadRefreshFailsAfterPersist(t *te
 			},
 		},
 	}
-	service, err := NewService(store, NewCompiler(nil))
+	service, err := NewService(store, NewCompilerWithFeatureCaps(nil, core.DefaultWorkflowFeatures()))
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}

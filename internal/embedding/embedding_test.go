@@ -1,10 +1,9 @@
 package embedding
 
 import (
-	"context"
 	"testing"
 
-	"gomodel/config"
+	"github.com/enterpilot/gomodel/config"
 )
 
 func TestNewEmbedder_EmptyProvider(t *testing.T) {
@@ -138,24 +137,10 @@ func TestAPIEmbedder_UsesProviderCredentials(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected *apiEmbedder, got %T", emb)
 	}
-	if a.apiKey != "gsk-abc" {
-		t.Errorf("expected apiKey gsk-abc, got %q", a.apiKey)
+	if got := a.keys.Primary(); got != "gsk-abc" {
+		t.Errorf("expected primary key gsk-abc, got %q", got)
 	}
 	if want := "https://api.groq.com/openai/v1/embeddings"; a.endpointURL != want {
 		t.Errorf("endpointURL = %q, want %q", a.endpointURL, want)
 	}
 }
-
-// MockEmbedder is an Embedder implementation for testing that returns a fixed vector.
-type MockEmbedder struct {
-	Vector []float32
-	Err    error
-	Calls  int
-}
-
-func (m *MockEmbedder) Embed(_ context.Context, _ string) ([]float32, error) {
-	m.Calls++
-	return m.Vector, m.Err
-}
-
-func (m *MockEmbedder) Close() error { return nil }

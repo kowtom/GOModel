@@ -13,7 +13,7 @@ server:
   enable_passthrough_routes: true # expose /p/{provider}/{endpoint} passthrough routes
   allow_passthrough_v1_alias: true # allow /p/{provider}/v1/... while keeping /p/{provider}/... canonical
   user_path_header: "X-GoModel-User-Path" # env: USER_PATH_HEADER; inbound header used for user_path scoping
-  enabled_passthrough_providers: ["openai", "anthropic", "openrouter", "zai", "vllm", "deepseek", "bailian"] # providers enabled on /p/{provider}/...
+  enabled_passthrough_providers: ["openai", "anthropic", "openrouter", "kilo", "zai", "vllm", "deepseek", "bailian"] # providers enabled on /p/{provider}/...
   realtime_enabled: true # env: REALTIME_ENABLED; expose /v1/realtime websocket and /p/{provider}/v1/realtime upgrades (OpenAI only)
 
 models:
@@ -59,9 +59,38 @@ models:
 #       - { model: openai/gpt-4o }
 #       - { model: groq/llama-3.3-70b }
 
+# MCP gateway: aggregate upstream MCP (Model Context Protocol) servers behind the
+# authenticated /mcp endpoint. Tools/prompts are namespaced as {server}_{name};
+# /mcp/{server} exposes one upstream with original names. Servers declared here or
+# via the MCP_SERVERS env var (a JSON object merged over this map, winning per name)
+# are read-only in the dashboard; the dashboard manages its own additional servers.
+# The gateway is the credential boundary: client API keys never reach an upstream,
+# and upstream headers support ${ENV} references. `user_paths` limits which callers
+# can even discover a server (subtree match, like virtual models).
+# mcp:
+#   enabled: true # env: MCP_ENABLED (default: true; a no-op with no servers)
+#   servers:
+#     github:
+#       url: https://api.githubcopilot.com/mcp
+#       transport: http # http (streamable HTTP, default) | sse (legacy) | stdio
+#       headers:
+#         Authorization: "Bearer ${GITHUB_PAT}"
+#       description: GitHub tools
+#       allowed_tools: [] # allowlist of upstream tool names; empty = all
+#       disallowed_tools: [] # blocklist, applied after the allowlist
+#       user_paths: [] # restrict visibility to these user-path subtrees; empty = everyone
+#       tool_timeout: 30s # per tools/call upper bound
+#     local-files: # stdio servers spawn a subprocess and are declarative-only:
+#       transport: stdio # the admin API and dashboard reject them by design
+#       command: npx
+#       args: ["-y", "@modelcontextprotocol/server-filesystem", "/data"]
+#       env: # subprocesses inherit only PATH/HOME/TMPDIR/USER/LANG — never the
+#         SOME_TOKEN: "${SOME_TOKEN}" # gateway's API keys; pass extras here explicitly
+
 cache:
   model:
     refresh_interval: 3600 # how often to refresh the model registry (seconds, default: 3600)
+    recheck_interval: 60 # env: PROVIDER_RECHECK_INTERVAL; how often providers whose last refresh failed are re-probed for recovery (seconds, default: 60; 0 disables)
     local:
       cache_dir: ".cache" # local cache directory
     # To use Redis instead of local cache, remove `local` and uncomment:
@@ -113,7 +142,7 @@ storage:
     database: "gomodel"
 
 logging:
-  enabled: false
+  enabled: true
   log_bodies: true # WARNING: may contain sensitive data
   log_headers: true
   buffer_size: 1000
@@ -143,6 +172,41 @@ budgets:
           amount: 10.00
         - period: "weekly"
           amount: 50.00
+
+rate_limits:
+  enabled: true # env: RATE_LIMITS_ENABLED; with no configured rules this has no effect
+  user_paths:
+    # Env equivalent:
+    # SET_RATE_LIMIT_USER__PATH__EXAMPLE="rpm=100,tpm=50000,rpd=10000,concurrent=10"
+    - path: "/user/path/example"
+      limits:
+        - period: "minute" # minute, hour, day, concurrent; stored in DB as period_seconds
+          max_requests: 100
+          max_tokens: 50000 # requires usage tracking (USAGE_ENABLED=true)
+        - period: "day"
+          max_requests: 10000
+        - period: "concurrent" # max_requests caps in-flight requests
+          max_requests: 10
+  # Provider rules cap one configured provider across all consumers and
+  # models. Virtual-model load balancing and failover skip a saturated
+  # provider while another target has capacity; when no target can take the
+  # request it gets 429. Env equivalent: SET_PROVIDER_RATE_LIMIT_OPENAI="rpm=500"
+  providers:
+    - name: "openai"
+      limits:
+        - period: "minute"
+          max_requests: 500
+          max_tokens: 200000
+        - period: "concurrent"
+          max_requests: 50
+  # Model rules cap one model: "openai/gpt-4o" pins one provider's model,
+  # a bare id like "gpt-4o" caps the model across every provider. No env
+  # form; use YAML or the admin API/dashboard.
+  models:
+    - model: "openai/gpt-4o"
+      limits:
+        - period: "minute"
+          max_tokens: 90000
 
 metrics:
   enabled: false
@@ -230,6 +294,13 @@ providers:
   openai:
     type: openai
     api_key: "sk-..."
+    # Several keys for one provider rotate round robin, raising the per-key rate
+    # limit. Equivalent env vars: OPENAI_API_KEY_2, OPENAI_API_KEY_3, ...
+    # Caveat: rotation defeats provider prompt caching, since providers scope the
+    # cache to the key that filled it.
+    # api_keys:
+    #   - "${OPENAI_API_KEY_2}"
+    #   - "${OPENAI_API_KEY_3}"
     # Per-provider resilience overrides (optional).
     # Only specified fields override the global defaults above.
     # resilience:
@@ -276,6 +347,26 @@ providers:
   groq:
     type: groq
     api_key: "gsk_..."
+
+  fireworks:
+    type: fireworks
+    api_key: "fw_..."
+    # models:
+    #   - id: "accounts/fireworks/models/gpt-oss-120b"
+
+  meta:
+    type: meta
+    api_key: "..."
+    # Muse Spark models are not in the upstream model catalog yet; supply
+    # metadata here to advertise context window and pricing to the gateway.
+    # models:
+    #   - id: "muse-spark-1.1"
+    #     metadata:
+    #       context_window: 1048576
+    #       pricing:
+    #         currency: USD
+    #         input_per_mtok: 1.25
+    #         output_per_mtok: 4.25
 
   zai:
     type: zai
@@ -336,6 +427,16 @@ providers:
   #     - openai/gpt-oss-120b
   #     - anthropic/claude-sonnet-4
 
+  # Example: Kilo AI Gateway. Model IDs use provider/model and are forwarded
+  # unchanged. You can also set KILO_MODELS as a comma-separated env var.
+  # kilo:
+  #   type: "kilo"
+  #   base_url: "https://api.kilo.ai/api/gateway"
+  #   api_key: "${KILO_API_KEY}"
+  #   models:
+  #     - anthropic/claude-sonnet-4.5
+  #     - openai/gpt-5.5
+
   # Example: Azure OpenAI
   # azure:
   #   type: "azure"
@@ -372,6 +473,19 @@ providers:
   #   # models:
   #   #   - anthropic.claude-3-5-haiku-20241022-v1:0
   #   #   - amazon.nova-lite-v1:0
+
+  # Example: Amazon Bedrock Mantle. This is the OpenAI-compatible Bedrock
+  # endpoint and is required for Responses-only models such as GPT-5.6.
+  # Authenticate with api_key or omit it to use the AWS credential chain.
+  # bedrock-mantle:
+  #   type: "bedrock-mantle"
+  #   base_url: "us-east-1"
+  #   api_key: "${BEDROCK_MANTLE_API_KEY}"
+  #   api_mode: "auto" # auto, openai, or standard
+  #   models:
+  #     - openai.gpt-5.6-sol
+  #     - openai.gpt-5.6-terra
+  #     - openai.gpt-5.6-luna
 
   # Example: local Ollama server with explicit per-model metadata.
   # Use the rich entry form to declare context_window, pricing, capabilities,
