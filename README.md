@@ -30,16 +30,29 @@
   <img src="docs/2026-07-07_demo.gif" alt="GoModel AI gateway dashboard showing AI usage analytics, observability panel, token and costs tracking, and estimated cost monitoring" width="100%">
 </a>
 
-## Quick Start with Docker
+## Quick Start
 
-**Step 1:** Start GoModel container
+**Step 1:** Install and start GoModel
+
+**macOS / Linux**
+
+```bash
+curl -fsSL https://gomodel.enterpilot.io/install.sh | sh
+OPENAI_API_KEY="your-openai-key" gomodel
+```
+
+**Windows (PowerShell)**
+
+```powershell
+irm https://gomodel.enterpilot.io/install.ps1 | iex
+$env:OPENAI_API_KEY = "your-openai-key"; gomodel
+```
+
+**Docker**
 
 ```bash
 docker run --rm -p 8080:8080 \
-  -e LOGGING_ENABLED=true \
-  -e LOGGING_LOG_BODIES=true \
   -e LOG_FORMAT=text \
-  -e LOGGING_LOG_HEADERS=true \
   -e OPENAI_API_KEY="your-openai-key" \
   enterpilot/gomodel
 ```
@@ -157,7 +170,3 @@ See the [Roadmap](./docs/about/roadmap.mdx) for commercial features and the publ
 ## Community
 
 Join our [Discord](https://discord.gg/gaEB9BQSPH) to connect with other GoModel users.
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=enterpilot/gomodel&type=date&legend=top-left)](https://www.star-history.com/#enterpilot/gomodel&type=date&legend=top-left)
