@@ -86,4 +86,6 @@ jobs:
           done
 
       - name: Validate local dev dependency manifests
-        run: kubeconform -strict -ignore-missing-schemas -summary deploy/local/deps.yaml
+        run: |
+          kubeconform -strict -ignore-missing-schemas -summary \
+            deploy/local/deps.yaml deploy/local/mockllm.yaml

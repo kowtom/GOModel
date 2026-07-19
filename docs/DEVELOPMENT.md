@@ -120,11 +120,14 @@ Develop against a local kind cluster with a build → deploy → watch loop that
 the production Helm chart:
 
 ```bash
-make kind-up     # create the kind cluster + dependencies (one time)
+make kind-up     # create the kind cluster + dependencies + mock LLM (one time)
 make dev-k8s     # build, load into kind, deploy, watch (access on :8080)
 make undeploy-k8s
 make kind-down
 ```
+
+`make kind-up` also deploys an in-cluster OpenAI-compatible mock upstream, so
+`/v1/chat/completions` works end-to-end without real provider credentials.
 
 See [dev/local-kubernetes.md](dev/local-kubernetes.md) for prerequisites,
 configuration, and troubleshooting.

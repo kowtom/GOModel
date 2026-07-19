@@ -59,9 +59,11 @@ kind-up:
 		|| kind create cluster --config deploy/local/kind-cluster.yaml
 	@kubectl cluster-info --context kind-$(KIND_CLUSTER)
 	kubectl --context kind-$(KIND_CLUSTER) apply -f deploy/local/deps.yaml
+	kubectl --context kind-$(KIND_CLUSTER) apply -f deploy/local/mockllm.yaml
 	kubectl --context kind-$(KIND_CLUSTER) rollout status deploy/redis --timeout=120s
 	kubectl --context kind-$(KIND_CLUSTER) rollout status deploy/postgres --timeout=120s
 	kubectl --context kind-$(KIND_CLUSTER) rollout status deploy/mongodb --timeout=180s
+	kubectl --context kind-$(KIND_CLUSTER) rollout status deploy/mockllm --timeout=120s
 
 # Delete the local kind cluster.
 kind-down:

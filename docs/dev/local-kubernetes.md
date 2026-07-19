@@ -23,19 +23,41 @@ Install these once:
 deploy/local/
   kind-cluster.yaml   # kind cluster (maps NodePort 30080 -> host 8080)
   deps.yaml           # in-cluster Redis + PostgreSQL + MongoDB (ephemeral)
+  mockllm.yaml        # in-cluster OpenAI-compatible mock upstream provider
   values.yaml         # Helm dev overrides (stateless: Postgres + Redis)
 skaffold.yaml         # build (Dockerfile.dev) + deploy (Helm)
 Dockerfile.dev        # fast native-arch build image
 ```
 
-The dependencies (Redis, PostgreSQL, MongoDB) are deployed once by `make kind-up`
-and persist across app redeploys — Skaffold manages only the GoModel app. This
-guarantees the datastores are ready before the app's first boot.
+The dependencies (Redis, PostgreSQL, MongoDB) and the mock upstream provider are
+deployed once by `make kind-up` and persist across app redeploys — Skaffold
+manages only the GoModel app. This guarantees the datastores are ready before the
+app's first boot.
+
+## Mock upstream provider
+
+`deploy/local/mockllm.yaml` runs a tiny stdlib-only Python server
+([`ThreadingHTTPServer`](https://docs.python.org/3/library/http.server.html))
+mounted from a ConfigMap into a `python:3.13-alpine` pod — no second image build,
+fully offline. It speaks the slice of the OpenAI API that GoModel needs:
+
+- `GET /v1/models` — advertises `gpt-4o`, `gpt-4o-mini`, `gpt-3.5-turbo`.
+- `POST /v1/chat/completions` — streaming (SSE) and non-streaming.
+- `POST /v1/responses` — streaming and non-streaming.
+
+It accepts **any** API key, so GoModel routes real requests end-to-end without
+provider credentials. The dev values point the OpenAI provider at it via
+`OPENAI_BASE_URL: http://mockllm:8080/v1`, which is how the gateway loads three
+models on boot as `openai/gpt-4o`, `openai/gpt-4o-mini`, `openai/gpt-3.5-turbo`.
+
+To point at a real provider instead, drop `OPENAI_BASE_URL` from
+`deploy/local/values.yaml` and set a real `OPENAI_API_KEY` (see
+[Adding a provider API key](#adding-a-provider-api-key)).
 
 ## Quick start
 
 ```bash
-make kind-up     # create the kind cluster + deploy dependencies (one time)
+make kind-up     # create the kind cluster + deploy deps + mock LLM (one time)
 make dev-k8s     # build, load into kind, deploy, watch for changes
 ```
 
@@ -46,6 +68,23 @@ curl localhost:8080/health          # {"status":"ok"}
 curl localhost:8080/health/ready     # {"status":"ready", ...} once Postgres is reachable
 open http://localhost:8080/admin/dashboard
 ```
+
+List the models loaded from the mock upstream, then send a chat completion
+straight through the gateway (auth uses the dev master key):
+
+```bash
+curl localhost:8080/v1/models -H "Authorization: Bearer dev-master-key"
+# lists openai/gpt-4o, openai/gpt-4o-mini, openai/gpt-3.5-turbo
+
+curl localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer dev-master-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"openai/gpt-3.5-turbo","messages":[{"role":"user","content":"ping"}]}'
+# {"...","choices":[{"message":{"role":"assistant","content":"Mock response to: ping"}...
+```
+
+Add `"stream":true,"stream_options":{"include_usage":true}` for a streamed SSE
+response.
 
 Edit any Go file and Skaffold automatically rebuilds the image, reloads it into
 kind, and rolls the pod. Press `Ctrl+C` to stop `skaffold dev` (it uninstalls the
@@ -67,14 +106,16 @@ Dev overrides live in [`deploy/local/values.yaml`](../../deploy/local/values.yam
 - `image.pullPolicy: IfNotPresent` — the image is built locally and loaded into
   kind (never pulled from a registry). Skaffold rewrites `image.repository`/`tag`.
 - `secrets.masterKey: dev-master-key` — **dev only**, never reuse elsewhere.
-- `secrets.data.OPENAI_API_KEY: sk-test` — a placeholder so a provider registers
-  and the gateway can boot; replace it (or add other keys) for real upstream calls.
+- `secrets.data.OPENAI_API_KEY: sk-mock` and `env.OPENAI_BASE_URL:
+  http://mockllm:8080/v1` — point the OpenAI provider at the in-cluster
+  [mock upstream](#mock-upstream-provider) so the gateway boots with real models.
 - Verbose logging (`LOG_LEVEL=debug`, text format) and audit logging enabled.
 
 ### Adding a provider API key
 
 Replace the placeholder or add credentials under `secrets.data` in
-`deploy/local/values.yaml`:
+`deploy/local/values.yaml`, and drop `env.OPENAI_BASE_URL` to hit the real
+upstream instead of the mock:
 
 ```yaml
 secrets:
@@ -106,8 +147,11 @@ port-forward is needed.
   (`make dev-k8s`/`deploy-k8s`) so the image is loaded into kind. `pullPolicy`
   must be `IfNotPresent` (already set in dev values).
 - **App CrashLoopBackOff: `no providers were successfully registered`** — at
-  least one `<PROVIDER>_API_KEY` must be set. The dev values ship a placeholder
-  `OPENAI_API_KEY: sk-test`; keep it or add your own.
+  least one `<PROVIDER>_API_KEY` must be set. The dev values ship
+  `OPENAI_API_KEY: sk-mock` pointed at the in-cluster mock; keep it or add your own.
+- **Gateway `/v1/models` empty / registry `failed_providers`** — the mock upstream
+  isn't reachable. Ensure `make kind-up` deployed it (`kubectl get pods` shows
+  `mockllm`) and that `env.OPENAI_BASE_URL` is `http://mockllm:8080/v1`.
 - **App CrashLoopBackOff: `failed to connect to redis` / DNS `server
   misbehaving`** — the dependencies aren't up yet. Run `make kind-up` (it applies
   `deploy/local/deps.yaml` and waits for rollout) before deploying the app.
