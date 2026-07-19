@@ -1,4 +1,4 @@
-.PHONY: all build run clean tidy test test-race test-dashboard test-e2e test-integration test-contract test-all lint lint-fix record-api swagger docs-openapi install-tools perf-check perf-bench infra image seed-demo-data
+.PHONY: all build run clean tidy test test-race test-dashboard test-e2e test-integration test-contract test-all lint lint-fix record-api swagger docs-openapi install-tools perf-check perf-bench infra image seed-demo-data kind-up kind-down dev-k8s deploy-k8s undeploy-k8s
 
 all: build
 
@@ -46,6 +46,39 @@ image:
 # Usage: SQLITE_PATH=data/gomodel.db make seed-demo-data
 seed-demo-data:
 	bash tools/seed-demo-data.sh
+
+# ---------------------------------------------------------------------------
+# Local Kubernetes development (kind + Skaffold)
+# See docs/dev/local-kubernetes.md
+# ---------------------------------------------------------------------------
+KIND_CLUSTER ?= gomodel-dev
+
+# Create the local kind cluster and deploy in-cluster dependencies (idempotent).
+kind-up:
+	@kind get clusters | grep -qx "$(KIND_CLUSTER)" \
+		|| kind create cluster --config deploy/local/kind-cluster.yaml
+	@kubectl cluster-info --context kind-$(KIND_CLUSTER)
+	kubectl --context kind-$(KIND_CLUSTER) apply -f deploy/local/deps.yaml
+	kubectl --context kind-$(KIND_CLUSTER) rollout status deploy/redis --timeout=120s
+	kubectl --context kind-$(KIND_CLUSTER) rollout status deploy/postgres --timeout=120s
+	kubectl --context kind-$(KIND_CLUSTER) rollout status deploy/mongodb --timeout=180s
+
+# Delete the local kind cluster.
+kind-down:
+	kind delete cluster --name $(KIND_CLUSTER)
+
+# Inner dev loop: build image, load into kind, deploy via Helm, watch for changes.
+# The gateway is reachable at http://localhost:8080 via the kind NodePort mapping.
+dev-k8s:
+	skaffold dev --kube-context kind-$(KIND_CLUSTER)
+
+# One-shot build + deploy (no watch).
+deploy-k8s:
+	skaffold run --kube-context kind-$(KIND_CLUSTER)
+
+# Tear down the deployed release and dependencies.
+undeploy-k8s:
+	skaffold delete --kube-context kind-$(KIND_CLUSTER)
 
 # Run unit tests only
 test:

@@ -5,11 +5,13 @@ on:
     branches: [main]
     paths:
       - "helm/**"
+      - "deploy/local/**"
       - ".github/workflows/helm-ci.yml"
   pull_request:
     branches: [main]
     paths:
       - "helm/**"
+      - "deploy/local/**"
       - ".github/workflows/helm-ci.yml"
 
 concurrency:
@@ -46,6 +48,9 @@ jobs:
             helm template ci helm -f "$f" > /dev/null
           done
 
+      - name: Helm template (local dev values)
+        run: helm template ci helm -f deploy/local/values.yaml > /dev/null
+
       - name: Set up chart-testing
         uses: helm/chart-testing-action@v2
 
@@ -74,8 +79,11 @@ jobs:
       - name: Render and validate manifests
         run: |
           set -euo pipefail
-          for f in helm/ci/*-values.yaml; do
+          for f in helm/ci/*-values.yaml deploy/local/values.yaml; do
             echo "Validating manifests rendered with $f"
             helm template ci helm -f "$f" \
               | kubeconform -strict -ignore-missing-schemas -summary
           done
+
+      - name: Validate local dev dependency manifests
+        run: kubeconform -strict -ignore-missing-schemas -summary deploy/local/deps.yaml
